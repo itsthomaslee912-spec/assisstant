@@ -168,6 +168,17 @@ def normalize_outlook_message(raw: dict) -> dict:
     }
 
 
+async def outlook_mark_read(access_token: str, message_id: str) -> None:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.patch(
+            f"{GRAPH}/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={"isRead": True},
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail=f"Outlook mark read failed: {resp.text}")
+
+
 async def outlook_send_message(
     access_token: str,
     *,

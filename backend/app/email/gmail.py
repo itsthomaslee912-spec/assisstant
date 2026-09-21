@@ -319,6 +319,17 @@ def normalize_gmail_message(raw: dict) -> dict:
     }
 
 
+async def gmail_mark_read(access_token: str, message_id: str) -> None:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{GMAIL_API}/users/me/messages/{message_id}/modify",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={"removeLabelIds": ["UNREAD"]},
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail=f"Gmail mark read failed: {resp.text}")
+
+
 async def gmail_send_message(
     access_token: str,
     *,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,8 +10,13 @@ from sqlalchemy.orm import Session
 from app.auth.oauth_google import ensure_google_access_token
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
 from app.db import get_db
-from app.email.gmail import gmail_get_message, gmail_send_message, split_mixed_plain_html
-from app.email.outlook import outlook_attach_folder, outlook_get_message, outlook_send_message
+from app.email.gmail import gmail_get_message, gmail_mark_read, gmail_send_message, split_mixed_plain_html
+from app.email.outlook import (
+    outlook_attach_folder,
+    outlook_get_message,
+    outlook_mark_read,
+    outlook_send_message,
+)
 from app.email.folders import VALID_FOLDERS
 from app.models import ClassifyCorrection, EmailLabel, EmailMessage, MailboxConnection, MailFolder, Provider
 from app.realtime.sse import publish
@@ -23,6 +29,7 @@ from app.schemas import (
     SendEmailOut,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/emails", tags=["emails"])
 
 
@@ -184,6 +191,25 @@ async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailMessag
                 raise HTTPException(status_code=502, detail=f"Could not load email body: {exc}") from exc
 
     if not email.is_read:
+        mailbox = (
+            db.query(MailboxConnection)
+            .filter(MailboxConnection.id == email.mailbox_id, MailboxConnection.is_active.is_(True))
+            .one_or_none()
+        )
+        if mailbox is not None:
+            try:
+                if mailbox.provider == Provider.GOOGLE.value:
+                    token = await ensure_google_access_token(db, mailbox)
+                    await gmail_mark_read(token, email.provider_message_id)
+                elif mailbox.provider == Provider.MICROSOFT.value:
+                    token = await ensure_microsoft_access_token(db, mailbox)
+                    await outlook_mark_read(token, email.provider_message_id)
+            except Exception:
+                logger.exception(
+                    "Failed to mark provider message read email_id=%s mailbox_id=%s",
+                    email.id,
+                    email.mailbox_id,
+                )
         email.is_read = True
     if email.label not in {item.value for item in EmailLabel}:
         email.label = EmailLabel.OTHERS.value
