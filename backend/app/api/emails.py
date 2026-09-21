@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 from app.auth.oauth_google import ensure_google_access_token
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
 from app.db import get_db
-from app.email.gmail import gmail_get_message, gmail_mark_read, gmail_send_message, split_mixed_plain_html
+from app.email.gmail import (
+    gmail_get_message,
+    gmail_mark_read,
+    gmail_mark_read_many,
+    gmail_send_message,
+    split_mixed_plain_html,
+)
 from app.email.outlook import (
     outlook_attach_folder,
     outlook_get_message,
@@ -25,6 +31,7 @@ from app.schemas import (
     EmailLabelUpdateIn,
     EmailOut,
     EmailPageOut,
+    MarkAllReadOut,
     SendEmailIn,
     SendEmailOut,
 )
@@ -135,6 +142,52 @@ def list_emails(
         mailbox_unread_counts=mailbox_unread_counts,
         folder_counts=folder_counts,
     )
+
+
+@router.post("/mark-all-read", response_model=MarkAllReadOut)
+async def mark_all_read(
+    mailbox_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> MarkAllReadOut:
+    filtered = _from_active_mailbox(db.query(EmailMessage)).filter(EmailMessage.is_read.is_not(True))
+    if mailbox_id is not None:
+        filtered = filtered.filter(EmailMessage.mailbox_id == mailbox_id)
+    unread = filtered.all()
+    if not unread:
+        return MarkAllReadOut(marked=0)
+
+    mailbox_ids = {row.mailbox_id for row in unread}
+    mailboxes = {
+        row.id: row
+        for row in db.query(MailboxConnection).filter(MailboxConnection.id.in_(mailbox_ids)).all()
+    }
+    grouped: dict[int, list[str]] = {}
+    for row in unread:
+        grouped.setdefault(row.mailbox_id, []).append(row.provider_message_id)
+
+    for mid, message_ids in grouped.items():
+        mailbox = mailboxes.get(mid)
+        if mailbox is None:
+            continue
+        try:
+            if mailbox.provider == Provider.GOOGLE.value:
+                token = await ensure_google_access_token(db, mailbox)
+                await gmail_mark_read_many(token, message_ids)
+            elif mailbox.provider == Provider.MICROSOFT.value:
+                token = await ensure_microsoft_access_token(db, mailbox)
+                for message_id in message_ids:
+                    await outlook_mark_read(token, message_id)
+        except Exception:
+            logger.exception(
+                "Failed to mark provider messages read mailbox_id=%s count=%s",
+                mid,
+                len(message_ids),
+            )
+
+    for row in unread:
+        row.is_read = True
+    db.commit()
+    return MarkAllReadOut(marked=len(unread))
 
 
 @router.get("/{email_id}", response_model=EmailDetailOut)

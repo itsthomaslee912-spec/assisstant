@@ -10,6 +10,7 @@ import {
   fetchEmailDetail,
   fetchEmails,
   fetchMailboxes,
+  markAllRead,
   oauthStartUrl,
   syncMailbox,
   reclassifyMailbox,
@@ -229,6 +230,8 @@ export default function App() {
   const [pendingLabel, setPendingLabel] = useState<{ emailId: number; nextLabel: EmailLabel } | null>(
     null
   );
+  const [markAllOpen, setMarkAllOpen] = useState(false);
+  const [markingAllRead, setMarkingAllRead] = useState(false);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<EmailDetail | null>(null);
@@ -1071,6 +1074,41 @@ export default function App() {
   }
 
   const selectedMailbox = selectedMailboxId != null ? mailboxById.get(selectedMailboxId) : null;
+  const scopeUnread = useMemo(() => {
+    if (selectedMailboxId == null) {
+      return Object.values(mailboxUnreadCounts).reduce((sum, n) => sum + n, 0);
+    }
+    return mailboxUnreadCounts[selectedMailboxId] ?? 0;
+  }, [selectedMailboxId, mailboxUnreadCounts]);
+
+  async function confirmMarkAllRead() {
+    const scopeId = selectedMailboxId;
+    setMarkingAllRead(true);
+    try {
+      await markAllRead(scopeId);
+      setEmails((prev) =>
+        prev.map((item) =>
+          scopeId == null || item.mailbox_id === scopeId ? { ...item, is_read: true } : item
+        )
+      );
+      setSelected((prev) =>
+        prev && (scopeId == null || prev.mailbox_id === scopeId) ? { ...prev, is_read: true } : prev
+      );
+      setMailboxUnreadCounts((counts) => {
+        if (scopeId == null) {
+          const next = { ...counts };
+          for (const key of Object.keys(next)) next[Number(key)] = 0;
+          return next;
+        }
+        return { ...counts, [scopeId]: 0 };
+      });
+      setMarkAllOpen(false);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Could not mark messages read");
+    } finally {
+      setMarkingAllRead(false);
+    }
+  }
   const readerAccount =
     selected != null ? mailboxById.get(selected.mailbox_id)?.email_address ?? "" : "";
 
@@ -1249,9 +1287,19 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <h2>
-              {selectedMailbox ? selectedMailbox.email_address : "All accounts"}
-            </h2>
+            <div className="list-title-row">
+              <h2>
+                {selectedMailbox ? selectedMailbox.email_address : "All accounts"}
+              </h2>
+              <button
+                type="button"
+                className="action-btn"
+                disabled={scopeUnread === 0 || markingAllRead}
+                onClick={() => setMarkAllOpen(true)}
+              >
+                Mark all as read
+              </button>
+            </div>
           </div>
           <div className="folder-badges" role="tablist" aria-label="Mail folders">
             <button
@@ -1482,6 +1530,41 @@ export default function App() {
           </article>
         )}
       </section>
+
+      {markAllOpen && (
+        <div className="dialog-backdrop" role="presentation">
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="mark-all-title">
+            <header className="dialog-header">
+              <h3 id="mark-all-title">Mark all as read</h3>
+            </header>
+            <div className="dialog-body">
+              <p className="dialog-hint">
+                {selectedMailbox
+                  ? `Mark ${scopeUnread} new message${scopeUnread === 1 ? "" : "s"} as read for ${selectedMailbox.email_address}?`
+                  : `Mark ${scopeUnread} new message${scopeUnread === 1 ? "" : "s"} as read for all accounts?`}
+              </p>
+              <div className="dialog-actions">
+                <button
+                  type="button"
+                  className="action-btn"
+                  disabled={markingAllRead}
+                  onClick={() => setMarkAllOpen(false)}
+                >
+                  No
+                </button>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  disabled={markingAllRead}
+                  onClick={() => void confirmMarkAllRead()}
+                >
+                  Yes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {pendingLabel && (
         <div className="dialog-backdrop" role="presentation">

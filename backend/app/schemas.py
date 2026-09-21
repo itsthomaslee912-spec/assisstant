@@ -81,6 +81,10 @@ class EmailPageOut(BaseModel):
     folder_counts: dict[str, int] = {}
 
 
+class MarkAllReadOut(BaseModel):
+    marked: int = 0
+
+
 class EmailDetailOut(EmailOut):
     body_text: str = ""
     body_html: str = ""

@@ -330,6 +330,21 @@ async def gmail_mark_read(access_token: str, message_id: str) -> None:
             raise HTTPException(status_code=400, detail=f"Gmail mark read failed: {resp.text}")
 
 
+async def gmail_mark_read_many(access_token: str, message_ids: list[str]) -> None:
+    if not message_ids:
+        return
+    async with httpx.AsyncClient(timeout=30) as client:
+        for start in range(0, len(message_ids), 1000):
+            chunk = message_ids[start : start + 1000]
+            resp = await client.post(
+                f"{GMAIL_API}/users/me/messages/batchModify",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"ids": chunk, "removeLabelIds": ["UNREAD"]},
+            )
+            if resp.status_code >= 400:
+                raise HTTPException(status_code=400, detail=f"Gmail mark read failed: {resp.text}")
+
+
 async def gmail_send_message(
     access_token: str,
     *,

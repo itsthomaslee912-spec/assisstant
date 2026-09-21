@@ -95,6 +95,130 @@ def test_get_email_marks_provider_read_once():
         mark_read.assert_not_awaited()
 
 
+def _seed_mailbox(db, *, external_id: str, email_address: str) -> MailboxConnection:
+    user = db.query(User).filter(User.external_id == external_id).one_or_none()
+    if user is None:
+        user = User(external_id=external_id)
+        db.add(user)
+        db.flush()
+    mailbox = MailboxConnection(
+        user_id=user.id,
+        provider=Provider.GOOGLE.value,
+        email_address=email_address,
+        access_token_enc="x",
+        refresh_token_enc="",
+        is_active=True,
+    )
+    db.add(mailbox)
+    db.flush()
+    return mailbox
+
+
+def _add_email(db, mailbox: MailboxConnection, provider_message_id: str, *, is_read: bool) -> EmailMessage:
+    email = EmailMessage(
+        mailbox_id=mailbox.id,
+        provider_message_id=provider_message_id,
+        subject=provider_message_id,
+        sender="sender@example.com",
+        snippet="hello",
+        body_text="Hello body",
+        label=EmailLabel.OTHERS.value,
+        is_read=is_read,
+    )
+    db.add(email)
+    return email
+
+
+def test_mark_all_read_includes_every_account_unread():
+    SessionLocal = _session_factory()
+    db = SessionLocal()
+    first = _seed_mailbox(db, external_id="u-all", email_address="a@example.com")
+    second = _seed_mailbox(db, external_id="u-all", email_address="b@example.com")
+    _add_email(db, first, "a-unread", is_read=False)
+    _add_email(db, first, "a-read", is_read=True)
+    _add_email(db, second, "b-unread", is_read=False)
+    db.commit()
+    db.close()
+
+    client = _client(SessionLocal)
+    mark_many = AsyncMock()
+    ensure_token = AsyncMock(return_value="token")
+
+    with (
+        patch("app.api.emails.gmail_mark_read_many", mark_many),
+        patch("app.api.emails.ensure_google_access_token", ensure_token),
+    ):
+        res = client.post("/api/emails/mark-all-read")
+        assert res.status_code == 200
+        assert res.json()["marked"] == 2
+
+    sent = sorted(message_id for call in mark_many.await_args_list for message_id in call.args[1])
+    assert sent == ["a-unread", "b-unread"]
+
+    db = SessionLocal()
+    rows = {row.provider_message_id: row.is_read for row in db.query(EmailMessage).all()}
+    db.close()
+    assert rows == {"a-unread": True, "a-read": True, "b-unread": True}
+
+
+def test_mark_all_read_limits_to_one_mailbox():
+    SessionLocal = _session_factory()
+    db = SessionLocal()
+    first = _seed_mailbox(db, external_id="u-one", email_address="a@example.com")
+    second = _seed_mailbox(db, external_id="u-one", email_address="b@example.com")
+    _add_email(db, first, "a-unread", is_read=False)
+    _add_email(db, second, "b-unread", is_read=False)
+    mailbox_id = first.id
+    db.commit()
+    db.close()
+
+    client = _client(SessionLocal)
+    mark_many = AsyncMock()
+    ensure_token = AsyncMock(return_value="token")
+
+    with (
+        patch("app.api.emails.gmail_mark_read_many", mark_many),
+        patch("app.api.emails.ensure_google_access_token", ensure_token),
+    ):
+        res = client.post("/api/emails/mark-all-read", params={"mailbox_id": mailbox_id})
+        assert res.status_code == 200
+        assert res.json()["marked"] == 1
+        mark_many.assert_awaited_once_with("token", ["a-unread"])
+
+    db = SessionLocal()
+    rows = {row.provider_message_id: row.is_read for row in db.query(EmailMessage).all()}
+    db.close()
+    assert rows["a-unread"] is True
+    assert rows["b-unread"] is False
+
+
+def test_mark_all_read_keeps_local_read_when_provider_fails():
+    SessionLocal = _session_factory()
+    db = SessionLocal()
+    mailbox = _seed_mailbox(db, external_id="u-fail", email_address="a@example.com")
+    _add_email(db, mailbox, "a-unread", is_read=False)
+    db.commit()
+    db.close()
+
+    client = _client(SessionLocal)
+    mark_many = AsyncMock(side_effect=RuntimeError("quota"))
+    ensure_token = AsyncMock(return_value="token")
+
+    with (
+        patch("app.api.emails.gmail_mark_read_many", mark_many),
+        patch("app.api.emails.ensure_google_access_token", ensure_token),
+    ):
+        res = client.post("/api/emails/mark-all-read")
+        assert res.status_code == 200
+        assert res.json()["marked"] == 1
+        mark_many.assert_awaited_once()
+
+    db = SessionLocal()
+    stored = db.query(EmailMessage).filter(EmailMessage.provider_message_id == "a-unread").one()
+    assert stored.is_read is True
+    db.close()
+
+
 def test_get_email_still_marks_local_read_when_provider_fails():
     SessionLocal = _session_factory()
     db = SessionLocal()

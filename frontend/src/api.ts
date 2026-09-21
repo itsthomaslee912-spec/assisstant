@@ -118,6 +118,17 @@ export async function fetchEmails(opts?: {
   return res.json();
 }
 
+export async function markAllRead(mailboxId?: number | null): Promise<{ marked: number }> {
+  const params = new URLSearchParams();
+  if (mailboxId != null) params.set("mailbox_id", String(mailboxId));
+  const qs = params.toString();
+  const res = await apiFetch(`${API_BASE}/api/emails/mark-all-read${qs ? `?${qs}` : ""}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to mark messages read"));
+  return res.json();
+}
+
 export async function fetchEmailDetail(id: number): Promise<EmailDetail> {
   const res = await apiFetch(`${API_BASE}/api/emails/${id}`, undefined, 4);
   if (!res.ok) throw new Error(await readApiError(res, "Failed to load email"));
