@@ -222,7 +222,7 @@ export default function SettingsPage({
                         className={viewMode === mode ? "seg-btn active" : "seg-btn"}
                         onClick={() => onViewModeChange(mode)}
                       >
-                        {mode === "list" ? "List" : mode === "table" ? "Table" : "Card"}
+                        {mode === "list" ? "List" : "Card"}
                       </button>
                     ))}
                   </div>

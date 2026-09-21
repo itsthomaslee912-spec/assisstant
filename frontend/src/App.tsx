@@ -46,7 +46,6 @@ const PAGE_SIZE = 50;
 const LIST_OVERSCAN = 12;
 const LIST_ROW_GROUP_H = 40;
 const LIST_ROW_EMAIL_H = 102;
-const LIST_ROW_TABLE_H = 44;
 const LIST_ROW_CARD_H = 148;
 
 type ListRow =
@@ -115,8 +114,11 @@ function parseMailboxCounts(raw: Record<string, number>): Record<number, number>
 
 function parseApiDate(value: string | null): Date | null {
   if (!value) return null;
-  const hasZone = /Z$/i.test(value) || /[+-]\d{2}:\d{2}$/.test(value);
-  const d = new Date(hasZone ? value : `${value}Z`);
+  // Normalize "2026-09-21 13:15:05+00:00" (Python str) → ISO with T
+  let normalized = value.trim().replace(" ", "T");
+  const hasZone = /Z$/i.test(normalized) || /[+-]\d{2}:?\d{2}$/.test(normalized);
+  if (!hasZone) normalized = `${normalized}Z`;
+  const d = new Date(normalized);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
@@ -183,7 +185,6 @@ function initialsFrom(text: string): string {
 }
 
 function emailRowHeight(mode: ViewMode): number {
-  if (mode === "table") return LIST_ROW_TABLE_H;
   if (mode === "card") return LIST_ROW_CARD_H;
   return LIST_ROW_EMAIL_H;
 }
@@ -1244,7 +1245,7 @@ export default function App() {
                   className={viewMode === mode ? "view-chip active" : "view-chip"}
                   onClick={() => chooseViewMode(mode)}
                 >
-                  {mode === "list" ? "List" : mode === "table" ? "Table" : "Card"}
+                  {mode === "list" ? "List" : "Card"}
                 </button>
               ))}
             </div>
@@ -1326,15 +1327,6 @@ export default function App() {
         {error && <p className="error pad">{error}</p>}
 
         <div className={`message-scroll view-${viewMode}`} ref={scrollRef}>
-          {viewMode === "table" && !loading && listRows.length > 0 && (
-            <div className="msg-table-head" aria-hidden="true">
-              <span>From</span>
-              <span>Subject</span>
-              <span>Category</span>
-              <span>Folder</span>
-              <span>Date</span>
-            </div>
-          )}
           {!loading && listRows.length > 0 && (
             <div
               className="virtual-list"

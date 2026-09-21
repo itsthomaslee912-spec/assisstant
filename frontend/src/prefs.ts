@@ -1,4 +1,4 @@
-export type ViewMode = "list" | "table" | "card";
+export type ViewMode = "list" | "card";
 export type FontFamily = "dm-sans" | "inter" | "source-serif" | "ibm-plex" | "system";
 export type FontSize = "small" | "medium" | "large";
 
@@ -6,7 +6,7 @@ const VIEW_KEY = "email-checker-view";
 const FONT_KEY = "email-checker-font";
 const FONT_SIZE_KEY = "email-checker-font-size";
 
-export const VIEW_MODES: ViewMode[] = ["list", "table", "card"];
+export const VIEW_MODES: ViewMode[] = ["list", "card"];
 export const FONT_FAMILIES: { id: FontFamily; label: string }[] = [
   { id: "dm-sans", label: "DM Sans" },
   { id: "inter", label: "Inter" },
@@ -38,7 +38,7 @@ function writeStorage(key: string, value: string): void {
 
 export function loadViewMode(): ViewMode {
   const value = readStorage(VIEW_KEY);
-  if (value === "list" || value === "table" || value === "card") return value;
+  if (value === "list" || value === "card") return value;
   return "list";
 }
 
