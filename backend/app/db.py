@@ -156,6 +156,16 @@ def init_db() -> None:
                     conn.execute(
                         text("UPDATE email_messages SET folder = 'inbox' WHERE folder IS NULL")
                     )
+                if "company" not in cols:
+                    conn.execute(text("ALTER TABLE email_messages ADD COLUMN company VARCHAR(255)"))
+                if "job_role" not in cols:
+                    conn.execute(text("ALTER TABLE email_messages ADD COLUMN job_role VARCHAR(255)"))
+                if "outcome_extracted" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE email_messages ADD COLUMN outcome_extracted BOOLEAN DEFAULT 0"
+                        )
+                    )
                 for old, new in LABEL_SLUG_REMAPS:
                     conn.execute(
                         text("UPDATE email_messages SET label = :new WHERE label = :old"),

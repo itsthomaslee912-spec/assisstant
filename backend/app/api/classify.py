@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -27,13 +27,19 @@ def classify_prompt_status(db: Session = Depends(get_db)) -> ClassifyPromptStatu
 
 
 @router.get("/training", response_model=ClassifyTrainingPageOut)
-def list_training_examples(db: Session = Depends(get_db)) -> ClassifyTrainingPageOut:
-    rows = db.query(ClassifyCorrection).order_by(ClassifyCorrection.id.desc()).all()
+def list_training_examples(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> ClassifyTrainingPageOut:
+    query = db.query(ClassifyCorrection).order_by(ClassifyCorrection.id.desc())
+    total = query.count()
+    rows = query.offset(offset).limit(limit).all()
     unused_count = unused_corrections_query(db).count()
     return ClassifyTrainingPageOut(
         items=[ClassifyTrainingExampleOut.model_validate(row) for row in rows],
         unused_count=unused_count,
-        total=len(rows),
+        total=total,
     )
 
 

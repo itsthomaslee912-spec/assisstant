@@ -11,6 +11,7 @@ from app.api import auth, classify, emails, events, health, mailboxes, webhooks
 from app.config import get_settings
 from app.db import init_db
 from app.realtime.renewal import renewal_loop
+from app.services.outcome_backfill import backfill_outcomes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,12 +22,14 @@ async def lifespan(app: FastAPI):
     init_db()
     stop_event = asyncio.Event()
     task = asyncio.create_task(renewal_loop(stop_event))
+    backfill_task = asyncio.create_task(backfill_outcomes(stop_event))
     logger.info("Auto AI Email Checker API started")
     try:
         yield
     finally:
         stop_event.set()
         await task
+        await backfill_task
 
 
 def create_app() -> FastAPI:

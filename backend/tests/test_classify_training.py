@@ -4,6 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from unittest.mock import AsyncMock, patch
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -91,10 +93,14 @@ def test_patch_label_saves_training_and_pins():
     db.close()
 
     client = _client(SessionLocal)
-    res = client.patch(
-        f"/api/emails/{email_id}/label",
-        json={"label": "rejected", "save_training": True},
-    )
+    with patch(
+        "app.classify.outcome_extract.extract_company_role",
+        new=AsyncMock(return_value=None),
+    ):
+        res = client.patch(
+            f"/api/emails/{email_id}/label",
+            json={"label": "rejected", "save_training": True},
+        )
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["label"] == "rejected"
@@ -287,6 +293,19 @@ def test_list_training_examples_marks_used_and_unused():
     assert used_flags["Thanks for applying"] is False
     assert used_flags["Interview next week"] is True
     assert "body_text" not in items[0]
+
+    newest = client.get("/api/classify/training", params={"limit": 1, "offset": 0})
+    assert newest.status_code == 200, newest.text
+    newest_body = newest.json()
+    assert newest_body["total"] == 2
+    assert newest_body["unused_count"] == 1
+    assert len(newest_body["items"]) == 1
+    assert newest_body["items"][0]["subject"] == "Interview next week"
+
+    older = client.get("/api/classify/training", params={"limit": 1, "offset": 1})
+    assert older.status_code == 200, older.text
+    assert older.json()["total"] == 2
+    assert older.json()["items"][0]["subject"] == "Thanks for applying"
 
 
 def test_classify_email_uses_db_prompt_not_seed(monkeypatch):

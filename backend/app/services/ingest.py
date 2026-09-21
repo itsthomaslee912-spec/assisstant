@@ -5,6 +5,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.classify.openai_classifier import classify_email
+from app.classify.outcome_extract import apply_outcome
 from app.email.folders import normalize_folder
 from app.models import EmailMessage, MailboxConnection
 from app.realtime.sse import publish
@@ -80,6 +81,7 @@ async def ingest_normalized_message(
         folder=normalize_folder(normalized.get("folder")),
     )
     db.add(email)
+    await apply_outcome(db, email)
     db.commit()
     db.refresh(email)
 

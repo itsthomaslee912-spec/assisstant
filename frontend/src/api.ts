@@ -194,31 +194,104 @@ export interface ClassifyTrainingPage {
   total: number;
 }
 
-export async function fetchClassifyTraining(): Promise<ClassifyTrainingPage> {
-  const res = await apiFetch(`${API_BASE}/api/classify/training`);
+export async function fetchClassifyTraining(opts?: {
+  limit?: number;
+  offset?: number;
+}): Promise<ClassifyTrainingPage> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  const res = await apiFetch(`${API_BASE}/api/classify/training${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(await readApiError(res, "Failed to load training data"));
   return res.json();
 }
 
 export interface MailboxLabelStats {
-  mailbox_id: number;
+  mailbox_id: number | null;
   date_from: string;
   date_to: string;
   total: number;
   label_counts: Record<string, number>;
 }
 
-export async function fetchMailboxLabelStats(
-  mailboxId: number,
-  dateFrom: string,
-  dateTo: string
-): Promise<MailboxLabelStats> {
-  const params = new URLSearchParams({
+export interface LabelTimeline {
+  mailbox_id: number;
+  label: string;
+  bucket: "hour" | "day";
+  date_from: string;
+  date_to: string;
+  buckets: { bucket: string; count: number }[];
+}
+
+export interface OutcomeEntry {
+  company: string;
+  role: string;
+  received_at: string | null;
+  subject: string;
+}
+
+export interface MailboxOutcomes {
+  mailbox_id: number;
+  date_from: string;
+  date_to: string;
+  applied: OutcomeEntry[];
+  rejected: OutcomeEntry[];
+  screening: OutcomeEntry[];
+  interview: OutcomeEntry[];
+  items: OutcomeEntry[];
+  total: number;
+  label: string | null;
+}
+
+export type OutcomeLabel = "applied" | "rejected" | "screening" | "interview";
+
+function statsRangeParams(dateFrom: string, dateTo: string): URLSearchParams {
+  return new URLSearchParams({
     date_from: dateFrom,
     date_to: dateTo,
   });
-  const res = await apiFetch(`${API_BASE}/api/mailboxes/${mailboxId}/label-stats?${params}`);
+}
+
+export async function fetchMailboxLabelStats(
+  mailboxId: number | "all",
+  dateFrom: string,
+  dateTo: string
+): Promise<MailboxLabelStats> {
+  const params = statsRangeParams(dateFrom, dateTo);
+  const path = mailboxId === "all" ? "/api/mailboxes/label-stats" : `/api/mailboxes/${mailboxId}/label-stats`;
+  const res = await apiFetch(`${API_BASE}${path}?${params}`);
   if (!res.ok) throw new Error(await readApiError(res, "Failed to load category statistics"));
+  return res.json();
+}
+
+export async function fetchMailboxLabelTimeline(
+  mailboxId: number,
+  label: OutcomeLabel,
+  dateFrom: string,
+  dateTo: string
+): Promise<LabelTimeline> {
+  const params = statsRangeParams(dateFrom, dateTo);
+  params.set("label", label);
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${mailboxId}/label-timeline?${params}`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load category timeline"));
+  return res.json();
+}
+
+export async function fetchMailboxOutcomes(
+  mailboxId: number,
+  dateFrom: string,
+  dateTo: string,
+  page?: { label: OutcomeLabel; limit: number; offset: number }
+): Promise<MailboxOutcomes> {
+  const params = statsRangeParams(dateFrom, dateTo);
+  if (page) {
+    params.set("label", page.label);
+    params.set("limit", String(page.limit));
+    params.set("offset", String(page.offset));
+  }
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${mailboxId}/outcomes?${params}`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load company and role lists"));
   return res.json();
 }
 

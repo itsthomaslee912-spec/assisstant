@@ -8,6 +8,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.auth.oauth_google import ensure_google_access_token
+from app.classify.outcome_extract import OUTCOME_LABELS, apply_outcome
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
 from app.db import get_db
 from app.email.gmail import (
@@ -303,8 +304,15 @@ async def update_email_label(
         email.label = new_label
 
     email.human_corrected = True
+    if previous_label != new_label and new_label in OUTCOME_LABELS:
+        email.outcome_extracted = False
     db.commit()
     db.refresh(email)
+
+    if previous_label != new_label and new_label in OUTCOME_LABELS:
+        if await apply_outcome(db, email, force=True):
+            db.commit()
+            db.refresh(email)
 
     payload_out = EmailOut.model_validate(email).model_dump()
     payload_out["previous_label"] = previous_label

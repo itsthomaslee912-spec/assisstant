@@ -163,3 +163,108 @@ def test_label_stats_hides_inactive_mailbox():
         params={"date_from": date(2026, 8, 1).isoformat(), "date_to": "2026-08-31"},
     )
     assert res.status_code == 404
+
+
+def test_label_stats_all_accounts_and_exact_datetime_bound():
+    SessionLocal = _session_factory()
+    db = SessionLocal()
+    box_a = _seed_mailbox(db, email_address="a@example.com")
+    box_b = _seed_mailbox(db, email_address="b@example.com")
+    _add_email(
+        db,
+        box_a.id,
+        label=EmailLabel.INTERVIEW.value,
+        received_at=datetime(2026, 8, 10, 15, 0, 0),
+        provider_message_id="a-1500",
+    )
+    _add_email(
+        db,
+        box_a.id,
+        label=EmailLabel.INTERVIEW.value,
+        received_at=datetime(2026, 8, 10, 16, 0, 0),
+        provider_message_id="a-1600",
+    )
+    _add_email(
+        db,
+        box_b.id,
+        label=EmailLabel.REJECTED.value,
+        received_at=datetime(2026, 8, 10, 15, 15, 0),
+        provider_message_id="b-1515",
+    )
+    db.commit()
+    mailbox_id = box_a.id
+    db.close()
+
+    client = _client(SessionLocal)
+    bounded = client.get(
+        f"/api/mailboxes/{mailbox_id}/label-stats",
+        params={"date_from": "2026-08-10T00:00:00", "date_to": "2026-08-10T15:30:00"},
+    )
+    assert bounded.status_code == 200, bounded.text
+    assert bounded.json()["total"] == 1
+    assert bounded.json()["label_counts"]["interview"] == 1
+
+    everyone = client.get(
+        "/api/mailboxes/label-stats",
+        params={"date_from": "2026-08-10", "date_to": "2026-08-10"},
+    )
+    assert everyone.status_code == 200, everyone.text
+    body = everyone.json()
+    assert body["mailbox_id"] is None
+    assert body["total"] == 3
+    assert body["label_counts"]["interview"] == 2
+    assert body["label_counts"]["rejected"] == 1
+
+
+def test_label_timeline_uses_hour_or_day_buckets():
+    SessionLocal = _session_factory()
+    db = SessionLocal()
+    box = _seed_mailbox(db, email_address="a@example.com")
+    _add_email(
+        db,
+        box.id,
+        label=EmailLabel.REJECTED.value,
+        received_at=datetime(2026, 8, 10, 12, 20, 0),
+        provider_message_id="same-day",
+    )
+    _add_email(
+        db,
+        box.id,
+        label=EmailLabel.REJECTED.value,
+        received_at=datetime(2026, 8, 2, 9, 0, 0),
+        provider_message_id="day-one",
+    )
+    _add_email(
+        db,
+        box.id,
+        label=EmailLabel.REJECTED.value,
+        received_at=datetime(2026, 8, 4, 9, 0, 0),
+        provider_message_id="day-three",
+    )
+    db.commit()
+    mailbox_id = box.id
+    db.close()
+
+    client = _client(SessionLocal)
+    hours = client.get(
+        f"/api/mailboxes/{mailbox_id}/label-timeline",
+        params={"label": "rejected", "date_from": "2026-08-10", "date_to": "2026-08-10"},
+    )
+    assert hours.status_code == 200, hours.text
+    hour_body = hours.json()
+    assert hour_body["bucket"] == "hour"
+    hour_counts = {item["bucket"]: item["count"] for item in hour_body["buckets"]}
+    assert hour_counts["2026-08-10T12:00:00"] == 1
+    assert sum(item["count"] for item in hour_body["buckets"]) == 1
+
+    days = client.get(
+        f"/api/mailboxes/{mailbox_id}/label-timeline",
+        params={"label": "rejected", "date_from": "2026-08-01", "date_to": "2026-08-05"},
+    )
+    assert days.status_code == 200, days.text
+    day_body = days.json()
+    assert day_body["bucket"] == "day"
+    day_counts = {item["bucket"]: item["count"] for item in day_body["buckets"]}
+    assert day_counts["2026-08-02T00:00:00"] == 1
+    assert day_counts["2026-08-04T00:00:00"] == 1
+    assert day_counts["2026-08-03T00:00:00"] == 0

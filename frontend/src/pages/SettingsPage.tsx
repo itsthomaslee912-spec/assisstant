@@ -3,10 +3,15 @@ import {
   fetchClassifyPromptStatus,
   fetchClassifyTraining,
   fetchMailboxLabelStats,
+  fetchMailboxLabelTimeline,
+  fetchMailboxOutcomes,
   type ClassifyPromptStatus,
   type ClassifyTrainingExample,
+  type LabelTimeline,
   type Mailbox,
   type MailboxLabelStats,
+  type OutcomeEntry,
+  type OutcomeLabel,
 } from "../api";
 import { CLASSIFY_LABEL_TITLES } from "../labels";
 import {
@@ -19,21 +24,30 @@ import {
 } from "../prefs";
 import type { ThemePref } from "../theme";
 import LabelBarChart from "../components/LabelBarChart";
+import LabelPieChart from "../components/LabelPieChart";
+import LabelTimelineChart from "../components/LabelTimelineChart";
 
 export type SettingsSection = "appearance" | "training" | "statistics";
 
-function localIsoDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+const TRAINING_PAGE_SIZE = 20;
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function toDatetimeLocal(value: Date): string {
+  return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}T${pad2(value.getHours())}:${pad2(value.getMinutes())}`;
 }
 
 function defaultDateRange(): { from: string; to: string } {
-  const to = new Date();
-  const from = new Date();
-  from.setDate(from.getDate() - 29);
-  return { from: localIsoDate(from), to: localIsoDate(to) };
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  return { from: toDatetimeLocal(start), to: toDatetimeLocal(now) };
+}
+
+function localInputToUtcIso(value: string): string {
+  return new Date(value).toISOString();
 }
 
 function formatWhen(value: string | null): string {
@@ -50,6 +64,63 @@ function formatWhen(value: string | null): string {
 
 function titleForLabel(slug: string): string {
   return CLASSIFY_LABEL_TITLES[slug as keyof typeof CLASSIFY_LABEL_TITLES] ?? slug;
+}
+
+function senderName(sender: string): string {
+  const match = sender.match(/^"?([^"<]+)"?\s*</);
+  if (match?.[1]) return match[1].trim();
+  return sender || "Unknown";
+}
+
+function initialsFrom(text: string): string {
+  const clean = text.replace(/@.*/, "").replace(/[^a-zA-Z0-9 ]/g, " ").trim();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+const OUTCOME_PAGE_SIZE = 20;
+const OUTCOME_CATEGORIES: { key: OutcomeLabel; title: string }[] = [
+  { key: "applied", title: "Applied" },
+  { key: "screening", title: "Screening" },
+  { key: "interview", title: "Interview" },
+  { key: "rejected", title: "Rejected" },
+];
+
+function tsvCell(value: string): string {
+  return value.replace(/[\t\r\n]+/g, " ");
+}
+
+function OutcomeTable({ rows }: { rows: OutcomeEntry[] }) {
+  return (
+    <section className="outcome-block">
+      {rows.length === 0 ? (
+        <p className="hint">None in this date range.</p>
+      ) : (
+        <div className="settings-table-wrap outcome-table">
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th>Company</th>
+                <th>Role</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${index}-${row.received_at ?? ""}-${row.subject}`}>
+                  <td data-label="Company">{row.company || row.subject || "—"}</td>
+                  <td data-label="Role">{row.role || "—"}</td>
+                  <td data-label="Date">{formatWhen(row.received_at) || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 export default function SettingsPage({
@@ -90,18 +161,26 @@ export default function SettingsPage({
   const [promptStatus, setPromptStatus] = useState<ClassifyPromptStatus | null>(null);
   const [training, setTraining] = useState<ClassifyTrainingExample[]>([]);
   const [trainingTotal, setTrainingTotal] = useState(0);
+  const [trainingPage, setTrainingPage] = useState(0);
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const [trainingLoading, setTrainingLoading] = useState(section === "training");
 
   const dateDefaults = useMemo(() => defaultDateRange(), []);
-  const [statsMailboxId, setStatsMailboxId] = useState<number | "">(
-    initialMailboxId ?? mailboxes[0]?.id ?? ""
+  const [statsMailboxId, setStatsMailboxId] = useState<number | "all">(
+    initialMailboxId ?? "all"
   );
   const [dateFrom, setDateFrom] = useState(dateDefaults.from);
   const [dateTo, setDateTo] = useState(dateDefaults.to);
   const [stats, setStats] = useState<MailboxLabelStats | null>(null);
+  const [timeline, setTimeline] = useState<LabelTimeline | null>(null);
+  const [outcomeLabel, setOutcomeLabel] = useState<OutcomeLabel>("applied");
+  const [outcomePage, setOutcomePage] = useState(0);
+  const [outcomeItems, setOutcomeItems] = useState<OutcomeEntry[]>([]);
+  const [outcomeTotal, setOutcomeTotal] = useState(0);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copyNote, setCopyNote] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -116,12 +195,20 @@ export default function SettingsPage({
     let cancelled = false;
     setTrainingLoading(true);
     setTrainingError(null);
-    Promise.all([fetchClassifyTraining(), fetchClassifyPromptStatus()])
+    Promise.all([
+      fetchClassifyTraining({ limit: TRAINING_PAGE_SIZE, offset: trainingPage * TRAINING_PAGE_SIZE }),
+      fetchClassifyPromptStatus(),
+    ])
       .then(([page, status]) => {
         if (cancelled) return;
-        setTraining(page.items);
-        setTrainingTotal(page.total);
         setPromptStatus(status);
+        setTrainingTotal(page.total);
+        const lastPage = Math.max(0, Math.ceil(page.total / TRAINING_PAGE_SIZE) - 1);
+        if (trainingPage > lastPage) {
+          setTrainingPage(lastPage);
+          return;
+        }
+        setTraining(page.items);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -134,37 +221,96 @@ export default function SettingsPage({
     return () => {
       cancelled = true;
     };
-  }, [section, unusedTraining]);
+  }, [section, unusedTraining, trainingPage]);
 
-  async function loadStats(event?: FormEvent) {
+  async function loadStats(
+    event?: FormEvent,
+    page = outcomePage,
+    label: OutcomeLabel = outcomeLabel
+  ) {
     event?.preventDefault();
-    if (statsMailboxId === "") {
-      setStatsError("Select an account");
-      setStats(null);
-      return;
-    }
     if (dateFrom > dateTo) {
-      setStatsError("From date must be on or before To date");
+      setStatsError("From must be on or before To");
       return;
     }
+    const fromIso = localInputToUtcIso(dateFrom);
+    const toIso = localInputToUtcIso(dateTo);
     setStatsLoading(true);
     setStatsError(null);
+    setCopyNote(null);
     try {
-      const result = await fetchMailboxLabelStats(Number(statsMailboxId), dateFrom, dateTo);
+      if (statsMailboxId === "all") {
+        const result = await fetchMailboxLabelStats("all", fromIso, toIso);
+        setStats(result);
+        setTimeline(null);
+        setOutcomeItems([]);
+        setOutcomeTotal(0);
+        return;
+      }
+      const [result, timelineResult, outcomeResult] = await Promise.all([
+        fetchMailboxLabelStats(statsMailboxId, fromIso, toIso),
+        fetchMailboxLabelTimeline(statsMailboxId, label, fromIso, toIso),
+        fetchMailboxOutcomes(statsMailboxId, fromIso, toIso, {
+          label,
+          limit: OUTCOME_PAGE_SIZE,
+          offset: page * OUTCOME_PAGE_SIZE,
+        }),
+      ]);
       setStats(result);
+      setTimeline(timelineResult);
+      setOutcomeItems(outcomeResult.items);
+      setOutcomeTotal(outcomeResult.total);
     } catch (err) {
       setStats(null);
+      setTimeline(null);
+      setOutcomeItems([]);
+      setOutcomeTotal(0);
       setStatsError(err instanceof Error ? err.message : "Failed to load statistics");
     } finally {
       setStatsLoading(false);
     }
   }
 
+  async function copyOutcomeResults() {
+    if (statsMailboxId === "all") return;
+    setCopying(true);
+    setCopyNote(null);
+    try {
+      const fromIso = localInputToUtcIso(dateFrom);
+      const toIso = localInputToUtcIso(dateTo);
+      const rows: OutcomeEntry[] = [];
+      let offset = 0;
+      let total = 0;
+      do {
+        const page = await fetchMailboxOutcomes(statsMailboxId, fromIso, toIso, {
+          label: outcomeLabel,
+          limit: 100,
+          offset,
+        });
+        total = page.total;
+        rows.push(...page.items);
+        offset += page.items.length;
+        if (page.items.length === 0) break;
+      } while (rows.length < total);
+      const lines = [
+        "Company\tRole\tDate\tSubject",
+        ...rows.map((row) =>
+          [row.company, row.role, formatWhen(row.received_at), row.subject].map(tsvCell).join("\t")
+        ),
+      ];
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setCopyNote(`Copied ${rows.length}`);
+    } catch (err) {
+      setCopyNote(err instanceof Error ? err.message : "Could not copy");
+    } finally {
+      setCopying(false);
+    }
+  }
+
   useEffect(() => {
     if (section !== "statistics") return;
-    if (statsMailboxId === "") return;
     void loadStats();
-    // Load once when opening Statistics with a mailbox selected.
+    // Load once when opening Statistics.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [section]);
 
@@ -324,46 +470,68 @@ export default function SettingsPage({
                     <p className="hint">Correct a category and save it as training data first.</p>
                   )}
                   {training.length > 0 && (
-                    <div className="settings-table-wrap">
-                      <table className="settings-table">
-                        <thead>
-                          <tr>
-                            <th>From</th>
-                            <th>Subject</th>
-                            <th>Previous</th>
-                            <th>Corrected</th>
-                            <th>Status</th>
-                            <th>Date</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {training.map((row) => {
-                            const used = row.used_in_prompt_version_id != null;
-                            return (
-                              <tr key={row.id}>
-                                <td>{row.sender || "—"}</td>
-                                <td>{row.subject || "(no subject)"}</td>
-                                <td>
-                                  <span className={`label list-label label-${row.previous_label}`}>
-                                    {titleForLabel(row.previous_label)}
-                                  </span>
-                                </td>
-                                <td>
-                                  <span className={`label list-label label-${row.corrected_label}`}>
-                                    {titleForLabel(row.corrected_label)}
-                                  </span>
-                                </td>
-                                <td>
-                                  <span className={used ? "read-pill" : "new-pill"}>
-                                    {used ? "Used" : "Unused"}
-                                  </span>
-                                </td>
-                                <td>{formatWhen(row.created_at)}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
+                    <div className="training-cards">
+                      {training.map((row) => {
+                        const used = row.used_in_prompt_version_id != null;
+                        const from = senderName(row.sender);
+                        return (
+                          <article key={row.id} className="training-card">
+                            <span className={`avatar soft label-${row.corrected_label}`}>
+                              {initialsFrom(from)}
+                            </span>
+                            <span className="msg-body">
+                              <span className="msg-top">
+                                <span className="msg-from">
+                                  <strong>{from}</strong>
+                                </span>
+                                <time className="msg-time">{formatWhen(row.created_at)}</time>
+                              </span>
+                              <span className="msg-subject">{row.subject || "(no subject)"}</span>
+                              {row.snippet ? <span className="msg-snippet">{row.snippet}</span> : null}
+                              <span className="msg-card-meta">
+                                <span className={`label list-label label-${row.previous_label}`}>
+                                  {titleForLabel(row.previous_label)}
+                                </span>
+                                <span className="training-arrow" aria-hidden="true">
+                                  →
+                                </span>
+                                <span className={`label list-label label-${row.corrected_label}`}>
+                                  {titleForLabel(row.corrected_label)}
+                                </span>
+                                <span className={used ? "read-pill" : "new-pill"}>
+                                  {used ? "Used" : "Unused"}
+                                </span>
+                              </span>
+                            </span>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {trainingTotal > TRAINING_PAGE_SIZE && (
+                    <div className="training-pager">
+                      <button
+                        type="button"
+                        className="action-btn"
+                        disabled={trainingLoading || trainingPage === 0}
+                        onClick={() => setTrainingPage((page) => Math.max(0, page - 1))}
+                      >
+                        Previous
+                      </button>
+                      <span>
+                        Page {trainingPage + 1} of {Math.ceil(trainingTotal / TRAINING_PAGE_SIZE)} · {trainingTotal}
+                      </span>
+                      <button
+                        type="button"
+                        className="action-btn"
+                        disabled={
+                          trainingLoading ||
+                          trainingPage >= Math.ceil(trainingTotal / TRAINING_PAGE_SIZE) - 1
+                        }
+                        onClick={() => setTrainingPage((page) => page + 1)}
+                      >
+                        Next
+                      </button>
                     </div>
                   )}
                 </section>
@@ -375,18 +543,30 @@ export default function SettingsPage({
                 <section className="settings-block">
                   <h3>Category statistics</h3>
                   <p className="settings-help">
-                    Counts of classification labels for one account in a date range.
+                    Counts from the start of today through now. All accounts shows every mailbox.
+                    One account also shows applied, screening, interview, and rejected company and role.
                   </p>
-                  <form className="stats-form" onSubmit={(event) => void loadStats(event)}>
+                  <form
+                    className="stats-form"
+                    onSubmit={(event) => {
+                      setOutcomePage(0);
+                      void loadStats(event, 0);
+                    }}
+                  >
                     <label className="settings-field">
                       Account
                       <select
-                        value={statsMailboxId === "" ? "" : String(statsMailboxId)}
-                        onChange={(event) =>
-                          setStatsMailboxId(event.target.value ? Number(event.target.value) : "")
-                        }
+                        value={statsMailboxId === "all" ? "all" : String(statsMailboxId)}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setStatsMailboxId(value === "all" ? "all" : Number(value));
+                          setStats(null);
+                          setTimeline(null);
+                          setOutcomeItems([]);
+                          setOutcomeTotal(0);
+                        }}
                       >
-                        {mailboxes.length === 0 && <option value="">No accounts</option>}
+                        <option value="all">All accounts</option>
                         {mailboxes.map((box) => (
                           <option key={box.id} value={box.id}>
                             {box.email_address}
@@ -397,7 +577,7 @@ export default function SettingsPage({
                     <label className="settings-field">
                       From
                       <input
-                        type="date"
+                        type="datetime-local"
                         value={dateFrom}
                         onChange={(event) => setDateFrom(event.target.value)}
                         required
@@ -406,23 +586,99 @@ export default function SettingsPage({
                     <label className="settings-field">
                       To
                       <input
-                        type="date"
+                        type="datetime-local"
                         value={dateTo}
                         onChange={(event) => setDateTo(event.target.value)}
                         required
                       />
                     </label>
-                    <button type="submit" className="action-btn" disabled={statsLoading || mailboxes.length === 0}>
+                    <button type="submit" className="action-btn" disabled={statsLoading}>
                       {statsLoading ? "Loading…" : "Search"}
                     </button>
                   </form>
                   {statsError && <p className="error">{statsError}</p>}
-                  {!mailboxes.length && <p className="hint">Add an account to see statistics.</p>}
                   {stats && stats.total === 0 && !statsError && (
-                    <p className="hint">No emails in this date range for the selected account.</p>
+                    <p className="hint">No emails in this date range.</p>
                   )}
-                  {stats && stats.total > 0 && (
-                    <LabelBarChart counts={stats.label_counts} total={stats.total} />
+                  {stats && (
+                    <div className="stats-chart-scroll">
+                      <LabelBarChart counts={stats.label_counts} total={stats.total} />
+                    </div>
+                  )}
+                  {stats && statsMailboxId !== "all" && (
+                    <div className="stats-visuals">
+                      <LabelPieChart counts={stats.label_counts} />
+                      {timeline && <LabelTimelineChart timeline={timeline} />}
+                    </div>
+                  )}
+                  {statsMailboxId !== "all" && stats && (
+                    <section className="outcome-block">
+                      <div className="outcome-toolbar">
+                        <div className="folder-badges" role="tablist" aria-label="Outcome category">
+                          {OUTCOME_CATEGORIES.map((item) => (
+                            <button
+                              key={item.key}
+                              type="button"
+                              className={outcomeLabel === item.key ? "folder-badge active" : "folder-badge"}
+                              onClick={() => {
+                                setOutcomeLabel(item.key);
+                                setOutcomePage(0);
+                                void loadStats(undefined, 0, item.key);
+                              }}
+                            >
+                              {item.title}
+                              {outcomeLabel === item.key ? (
+                                <span className="count-pill">{outcomeTotal}</span>
+                              ) : null}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          disabled={copying || outcomeTotal === 0}
+                          onClick={() => void copyOutcomeResults()}
+                        >
+                          {copying ? "Copying…" : "Copy"}
+                        </button>
+                      </div>
+                      {copyNote && <p className="hint">{copyNote}</p>}
+                      <OutcomeTable rows={outcomeItems} />
+                      {outcomeTotal > OUTCOME_PAGE_SIZE && (
+                        <div className="training-pager">
+                          <button
+                            type="button"
+                            className="action-btn"
+                            disabled={statsLoading || outcomePage === 0}
+                            onClick={() => {
+                              const next = Math.max(0, outcomePage - 1);
+                              setOutcomePage(next);
+                              void loadStats(undefined, next);
+                            }}
+                          >
+                            Previous
+                          </button>
+                          <span>
+                            Page {outcomePage + 1} of {Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE)} · {outcomeTotal}
+                          </span>
+                          <button
+                            type="button"
+                            className="action-btn"
+                            disabled={
+                              statsLoading ||
+                              outcomePage >= Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE) - 1
+                            }
+                            onClick={() => {
+                              const next = outcomePage + 1;
+                              setOutcomePage(next);
+                              void loadStats(undefined, next);
+                            }}
+                          >
+                            Next
+                          </button>
+                        </div>
+                      )}
+                    </section>
                   )}
                 </section>
               </div>

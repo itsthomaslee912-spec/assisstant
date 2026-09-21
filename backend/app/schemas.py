@@ -154,8 +154,42 @@ class ClassifyTrainingPageOut(BaseModel):
 
 
 class MailboxLabelStatsOut(BaseModel):
-    mailbox_id: int
+    mailbox_id: int | None = None
     date_from: str
     date_to: str
     total: int = 0
     label_counts: dict[str, int]
+
+
+class LabelTimelineBucketOut(BaseModel):
+    bucket: str
+    count: int = 0
+
+
+class LabelTimelineOut(BaseModel):
+    mailbox_id: int
+    label: str
+    bucket: str
+    date_from: str
+    date_to: str
+    buckets: list[LabelTimelineBucketOut]
+
+
+class OutcomeEntryOut(BaseModel):
+    company: str = ""
+    role: str = ""
+    received_at: UtcDateTime | None = None
+    subject: str = ""
+
+
+class MailboxOutcomesOut(BaseModel):
+    mailbox_id: int
+    date_from: str
+    date_to: str
+    applied: list[OutcomeEntryOut] = []
+    rejected: list[OutcomeEntryOut] = []
+    screening: list[OutcomeEntryOut] = []
+    interview: list[OutcomeEntryOut] = []
+    items: list[OutcomeEntryOut] = []
+    total: int = 0
+    label: str | None = None

@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from app.classify.openai_classifier import classify_email
+from app.classify.outcome_extract import BACKFILL_LABELS, OUTCOME_LABELS, extract_company_role
 from app.models import EmailMessage, MailboxConnection
 from app.realtime.sse import publish
 from app.schemas import EmailOut
@@ -122,6 +123,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                 EmailMessage.body_text,
                 EmailMessage.snippet,
                 EmailMessage.label,
+                EmailMessage.outcome_extracted,
             )
             .filter(
                 EmailMessage.mailbox_id == mailbox_id,
@@ -144,7 +146,9 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
         updated = 0
         failed = 0
 
-        async def classify_row(row: Any) -> tuple[int, str, Any] | None:
+        async def classify_row(
+            row: Any,
+        ) -> tuple[int, str, Any, tuple[str, str] | None, bool] | None:
             async with semaphore:
                 try:
                     result = await classify_email(
@@ -154,7 +158,19 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                         snippet=row.snippet or "",
                         force_openai=True,
                     )
-                    return row.id, row.label, result
+                    should_extract = result.label in OUTCOME_LABELS and (
+                        result.label != row.label
+                        or (result.label in BACKFILL_LABELS and not row.outcome_extracted)
+                    )
+                    extracted: tuple[str, str] | None = None
+                    if should_extract:
+                        extracted = await extract_company_role(
+                            subject=row.subject or "",
+                            sender=row.sender or "",
+                            body_text=row.body_text or "",
+                            snippet=row.snippet or "",
+                        )
+                    return row.id, row.label, result, extracted, should_extract
                 except Exception:
                     logger.exception("Reclassify failed for email %s", row.id)
                     return None
@@ -177,24 +193,35 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                 if outcome is None:
                     failed += 1
                     continue
-                email_id, previous_label, result = outcome
+                email_id, previous_label, result, extracted, should_extract = outcome
                 email = db.query(EmailMessage).filter(EmailMessage.id == email_id).one_or_none()
                 if email is None:
                     failed += 1
                     continue
                 if email.human_corrected:
                     continue
-                if email.label != result.label or email.confidence != result.confidence:
+                label_changed = email.label != result.label or email.confidence != result.confidence
+                if label_changed:
                     email.label = result.label
                     email.confidence = result.confidence
                     email.openai_response_id = result.response_id
+                outcome_changed = False
+                if should_extract and extracted is not None and email.label in OUTCOME_LABELS:
+                    email.company, email.job_role = extracted
+                    email.outcome_extracted = True
+                    outcome_changed = True
+                elif should_extract and label_changed and email.label in OUTCOME_LABELS:
+                    email.outcome_extracted = False
+                    outcome_changed = True
+                if label_changed or outcome_changed:
                     db.commit()
-                    db.refresh(email)
-                    updated += 1
-                    payload = EmailOut.model_validate(email).model_dump()
-                    payload["previous_label"] = previous_label
-                    payload["updated"] = True
-                    await publish("email.classified", payload)
+                    if label_changed:
+                        db.refresh(email)
+                        updated += 1
+                        payload = EmailOut.model_validate(email).model_dump()
+                        payload["previous_label"] = previous_label
+                        payload["updated"] = True
+                        await publish("email.classified", payload)
                 else:
                     db.rollback()
             await _publish_progress(
