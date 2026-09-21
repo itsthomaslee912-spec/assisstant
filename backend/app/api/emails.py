@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
@@ -40,11 +41,31 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/emails", tags=["emails"])
 
+InboxTypeLiteral = Literal["default", "unread_first"]
+
 
 def _from_active_mailbox(query):
     return query.join(
         MailboxConnection, MailboxConnection.id == EmailMessage.mailbox_id
     ).filter(MailboxConnection.is_active.is_(True))
+
+
+def _search_filter(query: str):
+    term = query.strip().lower()
+    if not term:
+        return None
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    needle = f"%{escaped}%"
+    columns = (
+        EmailMessage.subject,
+        EmailMessage.sender,
+        EmailMessage.snippet,
+        EmailMessage.company,
+        EmailMessage.job_role,
+    )
+    return or_(
+        *(func.lower(func.coalesce(column, "")).like(needle, escape="\\") for column in columns)
+    )
 
 
 def _email_from_active_mailbox(db: Session, email_id: int) -> EmailMessage | None:
@@ -55,14 +76,75 @@ def _email_from_active_mailbox(db: Session, email_id: int) -> EmailMessage | Non
     )
 
 
+def _normalize_cursor_at(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.replace(tzinfo=None)
+
+
+def _apply_default_cursor(page_q, before_id: int, before_received_at: datetime | None):
+    if before_received_at is not None:
+        cursor_at = _normalize_cursor_at(before_received_at)
+        return page_q.filter(
+            or_(
+                EmailMessage.received_at < cursor_at,
+                and_(EmailMessage.received_at == cursor_at, EmailMessage.id < before_id),
+                EmailMessage.received_at.is_(None),
+            )
+        )
+    return page_q.filter(and_(EmailMessage.received_at.is_(None), EmailMessage.id < before_id))
+
+
+def _apply_unread_first_cursor(
+    page_q,
+    before_id: int,
+    before_received_at: datetime | None,
+    before_is_read: bool | None,
+):
+    cursor_read = bool(before_is_read) if before_is_read is not None else False
+
+    def same_bucket_older(is_read_value: bool):
+        if before_received_at is not None:
+            cursor_at = _normalize_cursor_at(before_received_at)
+            return or_(
+                and_(
+                    EmailMessage.is_read.is_(is_read_value),
+                    EmailMessage.received_at < cursor_at,
+                ),
+                and_(
+                    EmailMessage.is_read.is_(is_read_value),
+                    EmailMessage.received_at == cursor_at,
+                    EmailMessage.id < before_id,
+                ),
+                and_(
+                    EmailMessage.is_read.is_(is_read_value),
+                    EmailMessage.received_at.is_(None),
+                    EmailMessage.id < before_id,
+                ),
+            )
+        return and_(
+            EmailMessage.is_read.is_(is_read_value),
+            EmailMessage.received_at.is_(None),
+            EmailMessage.id < before_id,
+        )
+
+    if not cursor_read:
+        # Still in unread bucket, then any read message.
+        return page_q.filter(or_(same_bucket_older(False), EmailMessage.is_read.is_(True)))
+    return page_q.filter(same_bucket_older(True))
+
+
 @router.get("", response_model=EmailPageOut)
 def list_emails(
     label: str | None = Query(default=None),
     mailbox_id: int | None = Query(default=None),
     folder: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    inbox_type: InboxTypeLiteral = Query(default="default"),
     limit: int = Query(default=50, ge=1, le=200),
     before_id: int | None = Query(default=None),
     before_received_at: datetime | None = Query(default=None),
+    before_is_read: bool | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> EmailPageOut:
     valid = {item.value for item in EmailLabel}
@@ -73,27 +155,30 @@ def list_emails(
         filtered = filtered.filter(EmailMessage.label == label)
     if folder and folder != "all" and folder in VALID_FOLDERS:
         filtered = filtered.filter(EmailMessage.folder == folder)
+    if q:
+        clause = _search_filter(q)
+        if clause is not None:
+            filtered = filtered.filter(clause)
 
     total = filtered.count()
-    page_q = filtered.order_by(EmailMessage.received_at.desc(), EmailMessage.id.desc())
+    unread_first = inbox_type == "unread_first"
+    if unread_first:
+        page_q = filtered.order_by(
+            EmailMessage.is_read.asc(),
+            EmailMessage.received_at.desc(),
+            EmailMessage.id.desc(),
+        )
+    else:
+        page_q = filtered.order_by(EmailMessage.received_at.desc(), EmailMessage.id.desc())
+
     if before_id is not None:
-        if before_received_at is not None:
-            cursor_at = before_received_at
-            if cursor_at.tzinfo is not None:
-                cursor_at = cursor_at.astimezone(timezone.utc).replace(tzinfo=None)
-            else:
-                cursor_at = cursor_at.replace(tzinfo=None)
-            page_q = page_q.filter(
-                or_(
-                    EmailMessage.received_at < cursor_at,
-                    and_(EmailMessage.received_at == cursor_at, EmailMessage.id < before_id),
-                    EmailMessage.received_at.is_(None),
-                )
+        if unread_first:
+            page_q = _apply_unread_first_cursor(
+                page_q, before_id, before_received_at, before_is_read
             )
         else:
-            page_q = page_q.filter(
-                and_(EmailMessage.received_at.is_(None), EmailMessage.id < before_id)
-            )
+            page_q = _apply_default_cursor(page_q, before_id, before_received_at)
+
     rows = page_q.limit(limit + 1).all()
     has_more = len(rows) > limit
     rows = rows[:limit]
@@ -136,6 +221,7 @@ def list_emails(
         items=[EmailOut.model_validate(row) for row in rows],
         next_cursor=rows[-1].id if rows else None,
         next_received_at=rows[-1].received_at if rows else None,
+        next_is_read=bool(rows[-1].is_read) if rows else None,
         has_more=has_more,
         total=total,
         label_counts=label_counts,

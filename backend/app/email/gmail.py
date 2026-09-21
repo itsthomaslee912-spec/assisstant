@@ -87,6 +87,63 @@ def _header(headers: list[dict], name: str) -> str:
     return ""
 
 
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_received_header_date(value: str) -> datetime | None:
+    """Extract the trailing timestamp from an RFC 5322 Received header."""
+    if not value:
+        return None
+    # Date is after the last ';' — e.g. "from ... by mx.google.com ...; Mon, 21 Sep 2026 14:21:13 -0700"
+    stamp = value.rsplit(";", 1)[-1].strip()
+    if not stamp:
+        return None
+    try:
+        parsed = parsedate_to_datetime(stamp)
+    except Exception:
+        return None
+    return _as_aware_utc(parsed)
+
+
+def _latest_received_header_time(headers: list[dict]) -> datetime | None:
+    """Return the most recent Received hop time (actual mailbox delivery).
+
+    Sender Date / Gmail internalDate can lag or precede delivery for batched
+    marketing mail; Received reflects when Gmail accepted the message.
+    """
+    latest: datetime | None = None
+    for h in headers:
+        if (h.get("name") or "").lower() != "received":
+            continue
+        parsed = _parse_received_header_date(h.get("value") or "")
+        if parsed is None:
+            continue
+        if latest is None or parsed > latest:
+            latest = parsed
+    return latest
+
+
+def _gmail_received_at(raw: dict, headers: list[dict]) -> datetime | None:
+    received_at = _latest_received_header_time(headers)
+    if received_at is not None:
+        return received_at
+    if raw.get("internalDate"):
+        try:
+            return datetime.fromtimestamp(int(raw["internalDate"]) / 1000, tz=timezone.utc)
+        except Exception:
+            pass
+    date_raw = _header(headers, "Date")
+    if date_raw:
+        try:
+            return _as_aware_utc(parsedate_to_datetime(date_raw))
+        except Exception:
+            return None
+    return None
+
+
 async def gmail_get_profile(access_token: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -261,24 +318,9 @@ def normalize_gmail_message(raw: dict) -> dict:
     headers = payload.get("headers") or []
     subject = _header(headers, "Subject")
     sender = _header(headers, "From")
-    # Prefer internalDate: epoch ms in UTC, matches Gmail inbox time and
-    # avoids SQLite dropping Date-header timezone offsets on write.
-    received_at = None
-    if raw.get("internalDate"):
-        try:
-            received_at = datetime.fromtimestamp(int(raw["internalDate"]) / 1000, tz=timezone.utc)
-        except Exception:
-            received_at = None
-    if received_at is None:
-        date_raw = _header(headers, "Date")
-        if date_raw:
-            try:
-                parsed = parsedate_to_datetime(date_raw)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                received_at = parsed.astimezone(timezone.utc)
-            except Exception:
-                received_at = None
+    # Prefer Received-header delivery time: Date/internalDate can be hours early
+    # for delayed/batched mail (e.g. ClinchTalent / Waymo digests).
+    received_at = _gmail_received_at(raw, headers)
 
     body_text, body_html = _extract_parts(payload)
     if body_text and not body_html:

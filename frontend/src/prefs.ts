@@ -1,12 +1,15 @@
 export type ViewMode = "list" | "card";
+export type InboxType = "default" | "unread_first";
 export type FontFamily = "dm-sans" | "inter" | "source-serif" | "ibm-plex" | "system";
 export type FontSize = "small" | "medium" | "large";
 
 const VIEW_KEY = "email-checker-view";
+const INBOX_TYPE_KEY = "email-checker-inbox-type";
 const FONT_KEY = "email-checker-font";
 const FONT_SIZE_KEY = "email-checker-font-size";
 
 export const VIEW_MODES: ViewMode[] = ["list", "card"];
+export const INBOX_TYPES: InboxType[] = ["default", "unread_first"];
 export const FONT_FAMILIES: { id: FontFamily; label: string }[] = [
   { id: "dm-sans", label: "DM Sans" },
   { id: "inter", label: "Inter" },
@@ -44,6 +47,16 @@ export function loadViewMode(): ViewMode {
 
 export function saveViewMode(mode: ViewMode): void {
   writeStorage(VIEW_KEY, mode);
+}
+
+export function loadInboxType(): InboxType {
+  const value = readStorage(INBOX_TYPE_KEY);
+  if (value === "default" || value === "unread_first") return value;
+  return "default";
+}
+
+export function saveInboxType(type: InboxType): void {
+  writeStorage(INBOX_TYPE_KEY, type);
 }
 
 export function loadFontFamily(): FontFamily {

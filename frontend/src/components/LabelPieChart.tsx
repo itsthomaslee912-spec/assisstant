@@ -1,10 +1,18 @@
-import type { EmailLabel } from "../api";
-import { CLASSIFY_LABEL_TITLES, LABEL_BAR_COLORS } from "../labels";
+import type { EmailLabel, OutcomeLabel } from "../api";
+import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES, LABEL_BAR_COLORS } from "../labels";
 
-const PIE_LABELS: EmailLabel[] = ["applied", "rejected", "screening", "interview"];
+const OUTCOME_LABELS = new Set<EmailLabel>(["applied", "rejected", "screening", "interview"]);
 
-export default function LabelPieChart({ counts }: { counts: Record<string, number> }) {
-  const slices = PIE_LABELS.map((key) => ({
+export default function LabelPieChart({
+  counts,
+  active,
+  onSelect,
+}: {
+  counts: Record<string, number>;
+  active: OutcomeLabel;
+  onSelect: (label: OutcomeLabel) => void;
+}) {
+  const slices = CLASSIFY_LABELS.map((key) => ({
     key,
     value: counts[key] ?? 0,
     color: LABEL_BAR_COLORS[key],
@@ -25,21 +33,35 @@ export default function LabelPieChart({ counts }: { counts: Record<string, numbe
           .join(", ")})`;
 
   return (
-    <div className="stats-pie-block">
-      <h4>Applied, rejected, screening, interview</h4>
+    <div className="stats-pie-block stats-card">
+      <h4>All categories</h4>
       <div className="stats-pie-row">
-        <div
-          className="stats-pie"
-          style={{ background: gradient }}
-          role="img"
-          aria-label="Applied, rejected, screening, and interview counts"
-        />
+        <div className="stats-donut" style={{ background: gradient }} role="img" aria-label="All category counts">
+          <div className="stats-donut-hole">
+            <strong>{total}</strong>
+            <span>total</span>
+          </div>
+        </div>
         <ul className="stats-pie-legend">
           {slices.map((slice) => (
-            <li key={slice.key}>
-              <span className="stats-pie-swatch" style={{ background: slice.color }} />
-              <span>{slice.title}</span>
-              <strong>{slice.value}</strong>
+            <li key={slice.key} className={slice.key === active ? "active" : undefined}>
+              {OUTCOME_LABELS.has(slice.key) ? (
+                <button
+                  type="button"
+                  className="stats-pie-pick"
+                  onClick={() => onSelect(slice.key as OutcomeLabel)}
+                >
+                  <span className="stats-pie-swatch" style={{ background: slice.color }} />
+                  <span>{slice.title}</span>
+                  <strong>{slice.value}</strong>
+                </button>
+              ) : (
+                <span className="stats-pie-pick">
+                  <span className="stats-pie-swatch" style={{ background: slice.color }} />
+                  <span>{slice.title}</span>
+                  <strong>{slice.value}</strong>
+                </span>
+              )}
             </li>
           ))}
         </ul>

@@ -11,7 +11,7 @@ export default function LabelBarChart({
   const max = Math.max(1, ...CLASSIFY_LABELS.map((key) => counts[key] ?? 0));
 
   return (
-    <div className="stats-chart-wrap">
+    <div className="stats-chart-wrap stats-card">
       <div className="stats-bars" role="img" aria-label="Category counts">
         {CLASSIFY_LABELS.map((key) => {
           const value = counts[key] ?? 0;
@@ -23,8 +23,8 @@ export default function LabelBarChart({
                 <div
                   className="stats-bar-fill"
                   style={{
-                    height: `${pct}%`,
-                    background: LABEL_BAR_COLORS[key as EmailLabel],
+                    height: `${Math.max(pct, value > 0 ? 4 : 0)}%`,
+                    background: `linear-gradient(180deg, ${LABEL_BAR_COLORS[key as EmailLabel]} 0%, color-mix(in srgb, ${LABEL_BAR_COLORS[key as EmailLabel]} 42%, transparent) 100%)`,
                   }}
                 />
               </div>

@@ -89,6 +89,7 @@ export interface EmailPage {
   items: EmailItem[];
   next_cursor: number | null;
   next_received_at: string | null;
+  next_is_read?: boolean | null;
   has_more: boolean;
   total: number;
   label_counts: Record<string, number>;
@@ -101,17 +102,23 @@ export async function fetchEmails(opts?: {
   label?: string;
   folder?: string;
   mailboxId?: number | null;
+  query?: string | null;
+  inboxType?: "default" | "unread_first";
   limit?: number;
   beforeId?: number | null;
   beforeReceivedAt?: string | null;
+  beforeIsRead?: boolean | null;
 }): Promise<EmailPage> {
   const params = new URLSearchParams();
   if (opts?.label && opts.label !== "all") params.set("label", opts.label);
   if (opts?.folder && opts.folder !== "all") params.set("folder", opts.folder);
+  if (opts?.query?.trim()) params.set("q", opts.query.trim());
   if (opts?.mailboxId != null) params.set("mailbox_id", String(opts.mailboxId));
+  if (opts?.inboxType && opts.inboxType !== "default") params.set("inbox_type", opts.inboxType);
   params.set("limit", String(opts?.limit ?? 50));
   if (opts?.beforeId != null) params.set("before_id", String(opts.beforeId));
   if (opts?.beforeReceivedAt) params.set("before_received_at", opts.beforeReceivedAt);
+  if (opts?.beforeIsRead != null) params.set("before_is_read", String(opts.beforeIsRead));
   const qs = params.toString();
   const res = await apiFetch(`${API_BASE}/api/emails${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(await readApiError(res, "Failed to load emails"));
@@ -267,7 +274,7 @@ export async function fetchMailboxLabelStats(
 
 export async function fetchMailboxLabelTimeline(
   mailboxId: number,
-  label: OutcomeLabel,
+  label: EmailLabel,
   dateFrom: string,
   dateTo: string
 ): Promise<LabelTimeline> {

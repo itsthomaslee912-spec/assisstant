@@ -29,7 +29,7 @@ from app.services.mailbox_cleanup import delete_emails_for_mailbox
 
 router = APIRouter(prefix="/api/mailboxes", tags=["mailboxes"])
 
-TIMELINE_LABELS = OUTCOME_LABELS
+TIMELINE_LABELS = frozenset(item.value for item in EmailLabel)
 _HOUR_SPAN = timedelta(hours=36)
 
 
@@ -237,7 +237,7 @@ def mailbox_outcomes(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> MailboxOutcomesOut:
-    if label is not None and label not in TIMELINE_LABELS:
+    if label is not None and label not in OUTCOME_LABELS:
         raise HTTPException(status_code=400, detail="Unsupported outcome label")
     _active_mailbox(db, mailbox_id)
     start, end, start_label, end_label = _parse_range(date_from, date_to)

@@ -32,13 +32,16 @@ import {
   applyFontSize,
   loadFontFamily,
   loadFontSize,
+  loadInboxType,
   loadViewMode,
   saveFontFamily,
   saveFontSize,
+  saveInboxType,
   saveViewMode,
   VIEW_MODES,
   type FontFamily,
   type FontSize,
+  type InboxType,
   type ViewMode,
 } from "./prefs";
 import { applyTheme, loadThemePref, saveThemePref, type ThemePref } from "./theme";
@@ -190,6 +193,48 @@ function emailRowHeight(mode: ViewMode): number {
   return LIST_ROW_EMAIL_H;
 }
 
+function receivedTime(email: EmailItem): number {
+  return parseApiDate(email.received_at)?.getTime() ?? 0;
+}
+
+function sortEmailsForInbox(items: EmailItem[], inboxType: InboxType): EmailItem[] {
+  if (inboxType !== "unread_first") return items;
+  return [...items].sort((a, b) => {
+    const ar = a.is_read ? 1 : 0;
+    const br = b.is_read ? 1 : 0;
+    if (ar !== br) return ar - br;
+    const at = receivedTime(a);
+    const bt = receivedTime(b);
+    if (at !== bt) return bt - at;
+    return b.id - a.id;
+  });
+}
+
+function groupEmailsByDate(items: EmailItem[]): { key: string; heading: string; items: EmailItem[] }[] {
+  const buckets = new Map<string, EmailItem[]>();
+  for (const email of items) {
+    let key = "unknown";
+    if (email.received_at) {
+      try {
+        const received = parseApiDate(email.received_at);
+        if (received) key = localDateKey(received);
+      } catch {
+        key = "unknown";
+      }
+    }
+    const list = buckets.get(key);
+    if (list) list.push(email);
+    else buckets.set(key, [email]);
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => (a === "unknown" ? 1 : b === "unknown" ? -1 : b.localeCompare(a)))
+    .map(([key, groupItems]) => ({
+      key,
+      heading: key === "unknown" ? "Unknown date" : formatDateHeading(key),
+      items: groupItems,
+    }));
+}
+
 function providerMark(provider: Provider): string {
   return provider === "google" ? "G" : "O";
 }
@@ -200,11 +245,14 @@ export default function App() {
   const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(null);
   const [label, setLabel] = useState<"all" | EmailLabel>("all");
   const [folder, setFolder] = useState<"all" | MailFolder>("all");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [nextReceivedAt, setNextReceivedAt] = useState<string | null>(null);
+  const [nextIsRead, setNextIsRead] = useState<boolean | null>(null);
   const [labelCounts, setLabelCounts] = useState<Record<EmailLabel, number>>(EMPTY_LABEL_COUNTS);
   const [mailboxCounts, setMailboxCounts] = useState<Record<number, number>>({});
   const [mailboxUnreadCounts, setMailboxUnreadCounts] = useState<Record<number, number>>({});
@@ -241,14 +289,27 @@ export default function App() {
   const [listW, setListW] = useState(() => loadStoredWidth(LIST_W_KEY, 360, LIST_MIN));
   const [themePref, setThemePref] = useState<ThemePref>(() => loadThemePref());
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewMode());
+  const [inboxType, setInboxType] = useState<InboxType>(() => loadInboxType());
   const [fontFamily, setFontFamily] = useState<FontFamily>(() => loadFontFamily());
   const [fontSize, setFontSize] = useState<FontSize>(() => loadFontSize());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
   const [resizing, setResizing] = useState(false);
 
-  const filterRef = useRef({ mailboxId: selectedMailboxId, label, folder });
-  filterRef.current = { mailboxId: selectedMailboxId, label, folder };
+  const filterRef = useRef({
+    mailboxId: selectedMailboxId,
+    label,
+    folder,
+    query: searchQuery,
+    inboxType,
+  });
+  filterRef.current = {
+    mailboxId: selectedMailboxId,
+    label,
+    folder,
+    query: searchQuery,
+    inboxType,
+  };
   const fetchGen = useRef(0);
   const loadingMoreRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -296,6 +357,7 @@ export default function App() {
     setHasMore(page.has_more);
     setNextCursor(page.next_cursor);
     setNextReceivedAt(page.next_received_at ?? null);
+    setNextIsRead(page.next_is_read ?? null);
     setLabelCounts(parseLabelCounts(page.label_counts));
     setMailboxCounts(parseMailboxCounts(page.mailbox_counts));
     setMailboxUnreadCounts(parseMailboxCounts(page.mailbox_unread_counts ?? {}));
@@ -304,7 +366,13 @@ export default function App() {
 
   const loadFirstPage = useCallback(async () => {
     const gen = ++fetchGen.current;
-    const { mailboxId, label: currentLabel, folder: currentFolder } = filterRef.current;
+    const {
+      mailboxId,
+      label: currentLabel,
+      folder: currentFolder,
+      query,
+      inboxType: currentInboxType,
+    } = filterRef.current;
     setLoading(true);
     setLoadingMore(false);
     loadingMoreRef.current = false;
@@ -312,15 +380,18 @@ export default function App() {
     setHasMore(false);
     setNextCursor(null);
     setNextReceivedAt(null);
+    setNextIsRead(null);
     try {
       const page = await fetchEmails({
         mailboxId,
         label: currentLabel,
         folder: currentFolder,
+        query,
+        inboxType: currentInboxType,
         limit: PAGE_SIZE,
       });
       if (gen !== fetchGen.current) return;
-      setEmails(page.items);
+      setEmails(sortEmailsForInbox(page.items, currentInboxType));
       applyPageMeta(page);
     } catch (err) {
       if (gen !== fetchGen.current) return;
@@ -336,21 +407,31 @@ export default function App() {
     loadingMoreRef.current = true;
     setLoadingMore(true);
     const gen = fetchGen.current;
-    const { mailboxId, label: currentLabel, folder: currentFolder } = filterRef.current;
+    const {
+      mailboxId,
+      label: currentLabel,
+      folder: currentFolder,
+      query,
+      inboxType: currentInboxType,
+    } = filterRef.current;
     try {
       const page = await fetchEmails({
         mailboxId,
         label: currentLabel,
         folder: currentFolder,
+        query,
+        inboxType: currentInboxType,
         limit: PAGE_SIZE,
         beforeId: nextCursor,
         beforeReceivedAt: nextReceivedAt,
+        beforeIsRead: currentInboxType === "unread_first" ? nextIsRead : null,
       });
       if (gen !== fetchGen.current) return;
       setEmails((prev) => {
         const seen = new Set(prev.map((item) => item.id));
         const extra = page.items.filter((item) => !seen.has(item.id));
-        return extra.length ? [...prev, ...extra] : prev;
+        if (!extra.length) return prev;
+        return sortEmailsForInbox([...prev, ...extra], currentInboxType);
       });
       applyPageMeta(page);
     } catch (err) {
@@ -360,7 +441,7 @@ export default function App() {
       loadingMoreRef.current = false;
       if (gen === fetchGen.current) setLoadingMore(false);
     }
-  }, [applyPageMeta, hasMore, nextCursor, nextReceivedAt]);
+  }, [applyPageMeta, hasMore, nextCursor, nextReceivedAt, nextIsRead]);
 
   const refreshPromptStatus = useCallback(async () => {
     try {
@@ -405,6 +486,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const handle = window.setTimeout(() => setSearchQuery(searchInput.trim()), 300);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
+
+  useEffect(() => {
     void load();
   }, [load]);
 
@@ -416,7 +502,7 @@ export default function App() {
     setEmails([]);
     scrollRef.current?.scrollTo(0, 0);
     void loadFirstPage();
-  }, [selectedMailboxId, label, folder, loadFirstPage]);
+  }, [selectedMailboxId, label, folder, searchQuery, loadFirstPage]);
 
   useEffect(() => {
     const source = new EventSource(eventsUrl());
@@ -440,25 +526,34 @@ export default function App() {
           previous_label?: EmailLabel;
           updated?: boolean;
         };
-        const { mailboxId, label: currentLabel, folder: currentFolder } = filterRef.current;
+        const { mailboxId, label: currentLabel, folder: currentFolder, query } = filterRef.current;
         const matchesMailbox = mailboxId == null || item.mailbox_id === mailboxId;
         const matchesLabel = currentLabel === "all" || item.label === currentLabel;
         const itemFolder = mailFolderOf(item);
         const matchesFolder = currentFolder === "all" || itemFolder === currentFolder;
+        const needle = query.trim().toLowerCase();
+        const matchesQuery =
+          !needle ||
+          `${item.subject}\n${item.sender}\n${item.snippet}`.toLowerCase().includes(needle);
         const isUpdate = Boolean(item.updated);
 
         setEmails((prev) => {
+          const inbox = filterRef.current.inboxType;
           const existingIdx = prev.findIndex((e) => e.id === item.id);
           if (existingIdx >= 0) {
-            if (matchesMailbox && matchesLabel && matchesFolder) {
+            if (matchesMailbox && matchesLabel && matchesFolder && matchesQuery) {
               const next = [...prev];
-              next[existingIdx] = { ...next[existingIdx], ...item, is_read: Boolean(item.is_read ?? next[existingIdx].is_read) };
-              return next;
+              next[existingIdx] = {
+                ...next[existingIdx],
+                ...item,
+                is_read: Boolean(item.is_read ?? next[existingIdx].is_read),
+              };
+              return sortEmailsForInbox(next, inbox);
             }
             return prev.filter((e) => e.id !== item.id);
           }
-          if (!isUpdate && matchesMailbox && matchesLabel && matchesFolder) {
-            return [{ ...item, is_read: Boolean(item.is_read) }, ...prev];
+          if (!isUpdate && matchesMailbox && matchesLabel && matchesFolder && matchesQuery) {
+            return sortEmailsForInbox([{ ...item, is_read: Boolean(item.is_read) }, ...prev], inbox);
           }
           return prev;
         });
@@ -718,6 +813,13 @@ export default function App() {
     saveViewMode(next);
   }
 
+  function chooseInboxType(next: InboxType) {
+    setInboxType(next);
+    saveInboxType(next);
+    filterRef.current = { ...filterRef.current, inboxType: next };
+    void loadFirstPage();
+  }
+
   function chooseFontFamily(next: FontFamily) {
     setFontFamily(next);
     saveFontFamily(next);
@@ -749,33 +851,54 @@ export default function App() {
     [labelCounts]
   );
 
-  const dateGroups = useMemo(() => {
-    const buckets = new Map<string, EmailItem[]>();
-    for (const email of emails) {
-      let key = "unknown";
-      if (email.received_at) {
-        try {
-          const received = parseApiDate(email.received_at);
-          if (received) key = localDateKey(received);
-        } catch {
-          key = "unknown";
-        }
-      }
-      const list = buckets.get(key);
-      if (list) list.push(email);
-      else buckets.set(key, [email]);
-    }
-    return [...buckets.entries()]
-      .sort(([a], [b]) => (a === "unknown" ? 1 : b === "unknown" ? -1 : b.localeCompare(a)))
-      .map(([key, items]) => ({
-        key,
-        heading: key === "unknown" ? "Unknown date" : formatDateHeading(key),
-        items,
-      }));
-  }, [emails]);
+  const dateGroups = useMemo(() => groupEmailsByDate(emails), [emails]);
 
   const listRows = useMemo((): ListRow[] => {
     const rows: ListRow[] = [];
+    const appendDateGroups = (prefix: string, items: EmailItem[]) => {
+      for (const group of groupEmailsByDate(items)) {
+        const key = `${prefix}:${group.key}`;
+        rows.push({
+          kind: "group",
+          key,
+          heading: group.heading,
+          count: group.items.length,
+        });
+        if (collapsedDates.has(key)) continue;
+        for (const email of group.items) {
+          rows.push({ kind: "email", email });
+        }
+      }
+    };
+
+    if (inboxType === "unread_first") {
+      const unread = emails.filter((email) => !email.is_read);
+      const read = emails.filter((email) => email.is_read);
+      if (unread.length) {
+        rows.push({
+          kind: "group",
+          key: "phase-unread",
+          heading: "Unread",
+          count: unread.length,
+        });
+        if (!collapsedDates.has("phase-unread")) {
+          appendDateGroups("unread", unread);
+        }
+      }
+      if (read.length) {
+        rows.push({
+          kind: "group",
+          key: "phase-read",
+          heading: "Read",
+          count: read.length,
+        });
+        if (!collapsedDates.has("phase-read")) {
+          appendDateGroups("read", read);
+        }
+      }
+      return rows;
+    }
+
     for (const group of dateGroups) {
       rows.push({
         kind: "group",
@@ -789,7 +912,7 @@ export default function App() {
       }
     }
     return rows;
-  }, [collapsedDates, dateGroups]);
+  }, [collapsedDates, dateGroups, emails, inboxType]);
 
   const listRowsRef = useRef(listRows);
   listRowsRef.current = listRows;
@@ -1030,10 +1153,13 @@ export default function App() {
             [opened.mailbox_id]: Math.max(0, (counts[opened.mailbox_id] ?? 1) - 1),
           }));
         }
-        return prev.map((item) =>
-          item.id === id
-            ? { ...item, is_read: true, folder: detail.folder ?? item.folder }
-            : item
+        return sortEmailsForInbox(
+          prev.map((item) =>
+            item.id === id
+              ? { ...item, is_read: true, folder: detail.folder ?? item.folder }
+              : item
+          ),
+          filterRef.current.inboxType,
         );
       });
     } catch (err) {
@@ -1087,8 +1213,11 @@ export default function App() {
     try {
       await markAllRead(scopeId);
       setEmails((prev) =>
-        prev.map((item) =>
-          scopeId == null || item.mailbox_id === scopeId ? { ...item, is_read: true } : item
+        sortEmailsForInbox(
+          prev.map((item) =>
+            scopeId == null || item.mailbox_id === scopeId ? { ...item, is_read: true } : item
+          ),
+          filterRef.current.inboxType,
         )
       );
       setSelected((prev) =>
@@ -1301,6 +1430,35 @@ export default function App() {
               </button>
             </div>
           </div>
+          <form
+            className="list-search"
+            onSubmit={(event: FormEvent) => {
+              event.preventDefault();
+              setSearchQuery(searchInput.trim());
+            }}
+          >
+            <input
+              className="list-search-input"
+              type="search"
+              placeholder="Search mail"
+              aria-label="Search mail"
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+            />
+            {searchInput ? (
+              <button
+                type="button"
+                className="list-search-clear"
+                aria-label="Clear search"
+                onClick={() => {
+                  setSearchInput("");
+                  setSearchQuery("");
+                }}
+              >
+                ×
+              </button>
+            ) : null}
+          </form>
           <div className="folder-badges" role="tablist" aria-label="Mail folders">
             <button
               type="button"
@@ -1443,9 +1601,11 @@ export default function App() {
           )}
           {!loading && !emails.length && mailboxes.length > 0 && (
             <p className="hint pad">
-              {folder === "all"
-                ? "No classified emails yet. Sync an account."
-                : `No emails in ${MAIL_FOLDER_TITLES[folder]}. Sync to refresh folder labels.`}
+              {searchQuery
+                ? "No emails match this search."
+                : folder === "all"
+                  ? "No classified emails yet. Sync an account."
+                  : `No emails in ${MAIL_FOLDER_TITLES[folder]}. Sync to refresh folder labels.`}
             </p>
           )}
           {!loading && !mailboxes.length && (
@@ -1685,6 +1845,8 @@ export default function App() {
           onThemeChange={chooseTheme}
           viewMode={viewMode}
           onViewModeChange={chooseViewMode}
+          inboxType={inboxType}
+          onInboxTypeChange={chooseInboxType}
           fontFamily={fontFamily}
           onFontFamilyChange={chooseFontFamily}
           fontSize={fontSize}

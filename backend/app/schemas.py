@@ -73,6 +73,7 @@ class EmailPageOut(BaseModel):
     items: list[EmailOut]
     next_cursor: int | None = None
     next_received_at: UtcDateTime | None = None
+    next_is_read: bool | None = None
     has_more: bool = False
     total: int = 0
     label_counts: dict[str, int]

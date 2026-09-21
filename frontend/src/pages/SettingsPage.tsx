@@ -13,19 +13,23 @@ import {
   type OutcomeEntry,
   type OutcomeLabel,
 } from "../api";
-import { CLASSIFY_LABEL_TITLES } from "../labels";
+import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES } from "../labels";
 import {
   FONT_FAMILIES,
   FONT_SIZES,
+  INBOX_TYPES,
   VIEW_MODES,
   type FontFamily,
   type FontSize,
+  type InboxType,
   type ViewMode,
 } from "../prefs";
 import type { ThemePref } from "../theme";
+import AccountSelect from "../components/AccountSelect";
+import CategoryLineChart from "../components/CategoryLineChart";
+import DateTimeField from "../components/DateTimeField";
 import LabelBarChart from "../components/LabelBarChart";
 import LabelPieChart from "../components/LabelPieChart";
-import LabelTimelineChart from "../components/LabelTimelineChart";
 
 export type SettingsSection = "appearance" | "training" | "statistics";
 
@@ -81,8 +85,8 @@ function initialsFrom(text: string): string {
 }
 
 const OUTCOME_PAGE_SIZE = 20;
+const CHART_LABELS = CLASSIFY_LABELS;
 const OUTCOME_CATEGORIES: { key: OutcomeLabel; title: string }[] = [
-  { key: "applied", title: "Applied" },
   { key: "screening", title: "Screening" },
   { key: "interview", title: "Interview" },
   { key: "rejected", title: "Rejected" },
@@ -131,6 +135,8 @@ export default function SettingsPage({
   onThemeChange,
   viewMode,
   onViewModeChange,
+  inboxType,
+  onInboxTypeChange,
   fontFamily,
   onFontFamilyChange,
   fontSize,
@@ -148,6 +154,8 @@ export default function SettingsPage({
   onThemeChange: (pref: ThemePref) => void;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
+  inboxType: InboxType;
+  onInboxTypeChange: (type: InboxType) => void;
   fontFamily: FontFamily;
   onFontFamilyChange: (font: FontFamily) => void;
   fontSize: FontSize;
@@ -172,8 +180,8 @@ export default function SettingsPage({
   const [dateFrom, setDateFrom] = useState(dateDefaults.from);
   const [dateTo, setDateTo] = useState(dateDefaults.to);
   const [stats, setStats] = useState<MailboxLabelStats | null>(null);
-  const [timeline, setTimeline] = useState<LabelTimeline | null>(null);
-  const [outcomeLabel, setOutcomeLabel] = useState<OutcomeLabel>("applied");
+  const [timelines, setTimelines] = useState<LabelTimeline[]>([]);
+  const [outcomeLabel, setOutcomeLabel] = useState<OutcomeLabel>("screening");
   const [outcomePage, setOutcomePage] = useState(0);
   const [outcomeItems, setOutcomeItems] = useState<OutcomeEntry[]>([]);
   const [outcomeTotal, setOutcomeTotal] = useState(0);
@@ -226,7 +234,8 @@ export default function SettingsPage({
   async function loadStats(
     event?: FormEvent,
     page = outcomePage,
-    label: OutcomeLabel = outcomeLabel
+    label: OutcomeLabel = outcomeLabel,
+    mailboxId: number | "all" = statsMailboxId
   ) {
     event?.preventDefault();
     if (dateFrom > dateTo) {
@@ -239,30 +248,32 @@ export default function SettingsPage({
     setStatsError(null);
     setCopyNote(null);
     try {
-      if (statsMailboxId === "all") {
+      if (mailboxId === "all") {
         const result = await fetchMailboxLabelStats("all", fromIso, toIso);
         setStats(result);
-        setTimeline(null);
+        setTimelines([]);
         setOutcomeItems([]);
         setOutcomeTotal(0);
         return;
       }
-      const [result, timelineResult, outcomeResult] = await Promise.all([
-        fetchMailboxLabelStats(statsMailboxId, fromIso, toIso),
-        fetchMailboxLabelTimeline(statsMailboxId, label, fromIso, toIso),
-        fetchMailboxOutcomes(statsMailboxId, fromIso, toIso, {
-          label,
-          limit: OUTCOME_PAGE_SIZE,
-          offset: page * OUTCOME_PAGE_SIZE,
-        }),
+      const [result, lineResults, outcomeResult] = await Promise.all([
+        fetchMailboxLabelStats(mailboxId, fromIso, toIso),
+        Promise.all(CHART_LABELS.map((lineLabel) => fetchMailboxLabelTimeline(mailboxId, lineLabel, fromIso, toIso))),
+        label === "applied"
+          ? Promise.resolve(null)
+          : fetchMailboxOutcomes(mailboxId, fromIso, toIso, {
+              label,
+              limit: OUTCOME_PAGE_SIZE,
+              offset: page * OUTCOME_PAGE_SIZE,
+            }),
       ]);
       setStats(result);
-      setTimeline(timelineResult);
-      setOutcomeItems(outcomeResult.items);
-      setOutcomeTotal(outcomeResult.total);
+      setTimelines(lineResults);
+      setOutcomeItems(outcomeResult?.items ?? []);
+      setOutcomeTotal(outcomeResult?.total ?? 0);
     } catch (err) {
       setStats(null);
-      setTimeline(null);
+      setTimelines([]);
       setOutcomeItems([]);
       setOutcomeTotal(0);
       setStatsError(err instanceof Error ? err.message : "Failed to load statistics");
@@ -271,8 +282,16 @@ export default function SettingsPage({
     }
   }
 
+  function selectOutcome(label: OutcomeLabel) {
+    setOutcomeLabel(label);
+    setOutcomePage(0);
+    setOutcomeItems([]);
+    setOutcomeTotal(0);
+    void loadStats(undefined, 0, label);
+  }
+
   async function copyOutcomeResults() {
-    if (statsMailboxId === "all") return;
+    if (statsMailboxId === "all" || outcomeLabel === "applied") return;
     setCopying(true);
     setCopyNote(null);
     try {
@@ -369,6 +388,24 @@ export default function SettingsPage({
                         onClick={() => onViewModeChange(mode)}
                       >
                         {mode === "list" ? "List" : "Card"}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+                <section className="settings-block">
+                  <h3>Inbox type</h3>
+                  <p className="settings-help">Order of messages in the inbox list.</p>
+                  <div className="seg-control" role="radiogroup" aria-label="Inbox type">
+                    {INBOX_TYPES.map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        role="radio"
+                        aria-checked={inboxType === type}
+                        className={inboxType === type ? "seg-btn active" : "seg-btn"}
+                        onClick={() => onInboxTypeChange(type)}
+                      >
+                        {type === "default" ? "Default" : "Unread first"}
                       </button>
                     ))}
                   </div>
@@ -544,7 +581,7 @@ export default function SettingsPage({
                   <h3>Category statistics</h3>
                   <p className="settings-help">
                     Counts from the start of today through now. All accounts shows every mailbox.
-                    One account also shows applied, screening, interview, and rejected company and role.
+                    One account shows every category on the pie and the line chart. Company and role are listed for screening, interview, and rejected.
                   </p>
                   <form
                     className="stats-form"
@@ -553,45 +590,21 @@ export default function SettingsPage({
                       void loadStats(event, 0);
                     }}
                   >
-                    <label className="settings-field">
-                      Account
-                      <select
-                        value={statsMailboxId === "all" ? "all" : String(statsMailboxId)}
-                        onChange={(event) => {
-                          const value = event.target.value;
-                          setStatsMailboxId(value === "all" ? "all" : Number(value));
-                          setStats(null);
-                          setTimeline(null);
-                          setOutcomeItems([]);
-                          setOutcomeTotal(0);
-                        }}
-                      >
-                        <option value="all">All accounts</option>
-                        {mailboxes.map((box) => (
-                          <option key={box.id} value={box.id}>
-                            {box.email_address}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="settings-field">
-                      From
-                      <input
-                        type="datetime-local"
-                        value={dateFrom}
-                        onChange={(event) => setDateFrom(event.target.value)}
-                        required
-                      />
-                    </label>
-                    <label className="settings-field">
-                      To
-                      <input
-                        type="datetime-local"
-                        value={dateTo}
-                        onChange={(event) => setDateTo(event.target.value)}
-                        required
-                      />
-                    </label>
+                    <AccountSelect
+                      value={statsMailboxId}
+                      mailboxes={mailboxes}
+                      onChange={(value) => {
+                        setStatsMailboxId(value);
+                        setOutcomePage(0);
+                        setStats(null);
+                        setTimelines([]);
+                        setOutcomeItems([]);
+                        setOutcomeTotal(0);
+                        void loadStats(undefined, 0, outcomeLabel, value);
+                      }}
+                    />
+                    <DateTimeField label="From" value={dateFrom} onChange={setDateFrom} />
+                    <DateTimeField label="To" value={dateTo} onChange={setDateTo} />
                     <button type="submit" className="action-btn" disabled={statsLoading}>
                       {statsLoading ? "Loading…" : "Search"}
                     </button>
@@ -606,9 +619,13 @@ export default function SettingsPage({
                     </div>
                   )}
                   {stats && statsMailboxId !== "all" && (
-                    <div className="stats-visuals">
-                      <LabelPieChart counts={stats.label_counts} />
-                      {timeline && <LabelTimelineChart timeline={timeline} />}
+                    <div className="stats-visuals stats-account">
+                      <LabelPieChart
+                        counts={stats.label_counts}
+                        active={outcomeLabel}
+                        onSelect={selectOutcome}
+                      />
+                      <CategoryLineChart series={timelines} />
                     </div>
                   )}
                   {statsMailboxId !== "all" && stats && (
@@ -620,11 +637,7 @@ export default function SettingsPage({
                               key={item.key}
                               type="button"
                               className={outcomeLabel === item.key ? "folder-badge active" : "folder-badge"}
-                              onClick={() => {
-                                setOutcomeLabel(item.key);
-                                setOutcomePage(0);
-                                void loadStats(undefined, 0, item.key);
-                              }}
+                              onClick={() => selectOutcome(item.key)}
                             >
                               {item.title}
                               {outcomeLabel === item.key ? (
@@ -633,50 +646,59 @@ export default function SettingsPage({
                             </button>
                           ))}
                         </div>
-                        <button
-                          type="button"
-                          className="action-btn"
-                          disabled={copying || outcomeTotal === 0}
-                          onClick={() => void copyOutcomeResults()}
-                        >
-                          {copying ? "Copying…" : "Copy"}
-                        </button>
+                        {outcomeLabel !== "applied" && (
+                          <button
+                            type="button"
+                            className="action-btn"
+                            disabled={copying || outcomeTotal === 0}
+                            onClick={() => void copyOutcomeResults()}
+                          >
+                            {copying ? "Copying…" : "Copy"}
+                          </button>
+                        )}
                       </div>
-                      {copyNote && <p className="hint">{copyNote}</p>}
-                      <OutcomeTable rows={outcomeItems} />
-                      {outcomeTotal > OUTCOME_PAGE_SIZE && (
-                        <div className="training-pager">
-                          <button
-                            type="button"
-                            className="action-btn"
-                            disabled={statsLoading || outcomePage === 0}
-                            onClick={() => {
-                              const next = Math.max(0, outcomePage - 1);
-                              setOutcomePage(next);
-                              void loadStats(undefined, next);
-                            }}
-                          >
-                            Previous
-                          </button>
-                          <span>
-                            Page {outcomePage + 1} of {Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE)} · {outcomeTotal}
-                          </span>
-                          <button
-                            type="button"
-                            className="action-btn"
-                            disabled={
-                              statsLoading ||
-                              outcomePage >= Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE) - 1
-                            }
-                            onClick={() => {
-                              const next = outcomePage + 1;
-                              setOutcomePage(next);
-                              void loadStats(undefined, next);
-                            }}
-                          >
-                            Next
-                          </button>
-                        </div>
+                      {outcomeLabel === "applied" ? (
+                        <p className="hint">Company and role are not listed for Applied.</p>
+                      ) : (
+                        <>
+                          {copyNote && <p className="hint">{copyNote}</p>}
+                          <OutcomeTable rows={outcomeItems} />
+                          {outcomeTotal > OUTCOME_PAGE_SIZE && (
+                            <div className="training-pager">
+                              <button
+                                type="button"
+                                className="action-btn"
+                                disabled={statsLoading || outcomePage === 0}
+                                onClick={() => {
+                                  const next = Math.max(0, outcomePage - 1);
+                                  setOutcomePage(next);
+                                  void loadStats(undefined, next);
+                                }}
+                              >
+                                Previous
+                              </button>
+                              <span>
+                                Page {outcomePage + 1} of {Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE)} ·{" "}
+                                {outcomeTotal}
+                              </span>
+                              <button
+                                type="button"
+                                className="action-btn"
+                                disabled={
+                                  statsLoading ||
+                                  outcomePage >= Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE) - 1
+                                }
+                                onClick={() => {
+                                  const next = outcomePage + 1;
+                                  setOutcomePage(next);
+                                  void loadStats(undefined, next);
+                                }}
+                              >
+                                Next
+                              </button>
+                            </div>
+                          )}
+                        </>
                       )}
                     </section>
                   )}
