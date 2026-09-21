@@ -6,8 +6,7 @@ export type EmailLabel =
   | "assessment"
   | "offer"
   | "rejected"
-  | "others"
-  | "unknown";
+  | "others";
 
 export type MailFolder = "inbox" | "spam" | "trash" | "archive";
 

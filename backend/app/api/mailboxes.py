@@ -66,7 +66,7 @@ def mailbox_label_stats(
     )
     total = 0
     for lab, count in rows:
-        key = lab if lab in valid else EmailLabel.UNKNOWN.value
+        key = lab if lab in valid else EmailLabel.OTHERS.value
         n = int(count)
         label_counts[key] = label_counts.get(key, 0) + n
         total += n

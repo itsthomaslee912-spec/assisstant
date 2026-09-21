@@ -9,7 +9,6 @@ export const CLASSIFY_LABELS: EmailLabel[] = [
   "offer",
   "rejected",
   "others",
-  "unknown",
 ];
 
 export const CLASSIFY_LABEL_TITLES: Record<EmailLabel, string> = {
@@ -21,7 +20,6 @@ export const CLASSIFY_LABEL_TITLES: Record<EmailLabel, string> = {
   offer: "Offer",
   rejected: "Rejected",
   others: "Others",
-  unknown: "Unknown",
 };
 
 export const EMPTY_LABEL_COUNTS: Record<EmailLabel, number> = {
@@ -33,7 +31,6 @@ export const EMPTY_LABEL_COUNTS: Record<EmailLabel, number> = {
   offer: 0,
   rejected: 0,
   others: 0,
-  unknown: 0,
 };
 
 export const LABEL_BAR_COLORS: Record<EmailLabel, string> = {
@@ -45,5 +42,4 @@ export const LABEL_BAR_COLORS: Record<EmailLabel, string> = {
   offer: "#5ecfc0",
   rejected: "#e36a6a",
   others: "#8b95a7",
-  unknown: "#9aa7b8",
 };

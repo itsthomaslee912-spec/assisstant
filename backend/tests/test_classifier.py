@@ -324,12 +324,14 @@ def test_system_prompt_lists_every_label():
 
     slugs = {item.value for item in EmailLabel}
     assert {item.slug for item in CLASSIFY_TYPES} == slugs
-    assert EmailLabel.UNKNOWN.value in slugs
+    assert "unknown" not in slugs
     for slug in slugs:
         assert slug in SYSTEM_PROMPT
+    assert "- unknown" not in SYSTEM_PROMPT
     assert normalize_label("applied") == EmailLabel.APPLIED.value
     assert normalize_label("application_submitted") == EmailLabel.APPLIED.value
     assert normalize_label("alert") == EmailLabel.JOB_ALERT.value
     assert normalize_label("available") == EmailLabel.SCREENING.value
     assert normalize_label("tech") == EmailLabel.ASSESSMENT.value
-    assert normalize_label("not_a_label") == EmailLabel.UNKNOWN.value
+    assert normalize_label("unknown") == EmailLabel.OTHERS.value
+    assert normalize_label("not_a_label") == EmailLabel.OTHERS.value

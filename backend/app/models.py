@@ -23,7 +23,6 @@ class EmailLabel(str, Enum):
     OFFER = "offer"
     REJECTED = "rejected"
     OTHERS = "others"
-    UNKNOWN = "unknown"
 
 
 class MailFolder(str, Enum):

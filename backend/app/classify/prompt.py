@@ -74,24 +74,17 @@ CLASSIFY_TYPES: tuple[ClassifyType, ...] = (
         "Others",
         "Non-job mail: 2FA / security alerts, product newsletters, personal, banking, shopping, "
         "employer PR with no jobs, webinars/career fairs, complete-your-profile nags, talent-network "
-        "signups with no live req. Recruiting pipeline mail MUST NOT use others.",
-    ),
-    ClassifyType(
-        "unknown",
-        "Unknown",
-        "Use only when the email cannot be classified into the other slugs with reasonable "
-        "confidence. Do NOT use unknown as a dump for non-job mail (that is others). "
-        "Do NOT use others when you are merely unsure.",
+        "signups with no live req. Also use others when the email is too ambiguous to pick a "
+        "hiring-stage slug. Recruiting pipeline mail that clearly fits a stage MUST NOT use others.",
     ),
 )
 
 CLASSIFY_RULES = [
     "Classification:",
     "- Choose exactly ONE slug.",
-    "- Use `others` only when the email is unrelated to a live hiring stage (non-job / noise).",
-    "- Use `unknown` when you cannot tell which hiring-stage or others label applies. Never use "
-    "others because you are unsure.",
-    "- Never use others for applications, recruiter screens, interviews, assessments, offers, "
+    "- Use `others` for non-job mail / noise, or when no hiring-stage slug clearly fits.",
+    "- Prefer a hiring-stage slug when signals are clear; do not force a stage on ambiguous mail.",
+    "- Never use others for clear applications, recruiter screens, interviews, assessments, offers, "
     "rejections, or job alerts.",
     "- rejected beats thank-you / applied wording: “will not move forward”, “other candidates”, "
     "application-limit caps, “position is not available in your current location”, withdrawn.",

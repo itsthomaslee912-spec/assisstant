@@ -28,6 +28,7 @@ LEGACY_LABEL_MAP = {
     "profile_update_request": EmailLabel.OTHERS.value,
     "withdrawn": EmailLabel.REJECTED.value,
     "hired": EmailLabel.OFFER.value,
+    "unknown": EmailLabel.OTHERS.value,
 }
 
 
@@ -35,7 +36,7 @@ def normalize_label(raw: str) -> str:
     label = raw.lower().strip().replace(" ", "_")
     label = LEGACY_LABEL_MAP.get(label, label)
     if label not in VALID_LABELS:
-        return EmailLabel.UNKNOWN.value
+        return EmailLabel.OTHERS.value
     return label
 
 
@@ -46,13 +47,13 @@ def _parse_label(content: str) -> tuple[str, float | None]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
-            return EmailLabel.UNKNOWN.value, None
+            return EmailLabel.OTHERS.value, None
         try:
             data = json.loads(match.group(0))
         except json.JSONDecodeError:
-            return EmailLabel.UNKNOWN.value, None
+            return EmailLabel.OTHERS.value, None
 
-    label = normalize_label(str(data.get("label", EmailLabel.UNKNOWN.value)))
+    label = normalize_label(str(data.get("label", EmailLabel.OTHERS.value)))
     confidence = data.get("confidence")
     try:
         confidence_f = float(confidence) if confidence is not None else None
@@ -386,13 +387,13 @@ async def classify_email(
     # Heuristic-only path (fallback or tests). Live/Sync use OpenAI + guards.
     if not force_openai and not use_openai:
         return ClassificationResult(
-            label=(heuristic or EmailLabel.UNKNOWN.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
             confidence=0.55 if heuristic else 0.35,
             response_id=None,
         )
     if not settings.openai_api_key:
         return ClassificationResult(
-            label=(heuristic or EmailLabel.UNKNOWN.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
             confidence=0.45 if heuristic else None,
             response_id=None,
         )
@@ -414,7 +415,7 @@ async def classify_email(
     except Exception:
         logger.exception("OpenAI classification failed; using heuristic")
         return ClassificationResult(
-            label=(heuristic or EmailLabel.UNKNOWN.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
             confidence=0.45 if heuristic else None,
             response_id=None,
         )

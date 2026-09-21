@@ -40,6 +40,7 @@ LABEL_SLUG_REMAPS = (
     ("profile_update_request", "others"),
     ("withdrawn", "rejected"),
     ("hired", "offer"),
+    ("unknown", "others"),
 )
 
 _DROPPED_TAXONOMY_SLUGS = (
@@ -52,6 +53,7 @@ _DROPPED_TAXONOMY_SLUGS = (
     "profile_update_request",
     "withdrawn",
     "hired",
+    "unknown",
 )
 
 
@@ -76,10 +78,8 @@ def seed_default_classify_prompt() -> None:
         db.close()
 
 
-def _is_taxonomy_v3_prompt(text: str) -> bool:
+def _is_current_taxonomy_prompt(text: str) -> bool:
     if not text:
-        return False
-    if "- unknown" not in text and "unknown —" not in text:
         return False
     if any(f"- {slug}" in text for slug in _DROPPED_TAXONOMY_SLUGS):
         return False
@@ -88,8 +88,8 @@ def _is_taxonomy_v3_prompt(text: str) -> bool:
     return all(item.value in text for item in EmailLabel)
 
 
-def ensure_taxonomy_v3_prompt() -> bool:
-    """Activate the nine-label SYSTEM_PROMPT when the live prompt is still v2.
+def ensure_taxonomy_v4_prompt() -> bool:
+    """Activate the eight-label SYSTEM_PROMPT when the live prompt still lists unknown.
 
     Does not start a reclassify job. Returns True only when a new version was inserted.
     """
@@ -106,7 +106,7 @@ def ensure_taxonomy_v3_prompt() -> bool:
             .first()
         )
         text = (active.prompt_text if active else "") or ""
-        if _is_taxonomy_v3_prompt(text):
+        if _is_current_taxonomy_prompt(text):
             return False
         if active is not None:
             active.is_active = False
@@ -114,7 +114,7 @@ def ensure_taxonomy_v3_prompt() -> bool:
             ClassifyPromptVersion(
                 prompt_text=SYSTEM_PROMPT,
                 is_active=True,
-                source="taxonomy_v3",
+                source="taxonomy_v4",
                 example_count=0,
             )
         )
@@ -192,4 +192,4 @@ def init_db() -> None:
     from app.services.mailbox_cleanup import purge_orphaned_mailbox_mail
 
     purge_orphaned_mailbox_mail()
-    ensure_taxonomy_v3_prompt()
+    ensure_taxonomy_v4_prompt()

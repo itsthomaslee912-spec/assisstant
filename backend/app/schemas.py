@@ -36,7 +36,6 @@ EmailLabelLiteral = Literal[
     "offer",
     "rejected",
     "others",
-    "unknown",
 ]
 ProviderLiteral = Literal["google", "microsoft"]
 

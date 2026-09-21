@@ -84,7 +84,7 @@ def list_emails(
     rows = rows[:limit]
     for row in rows:
         if row.label not in valid:
-            row.label = EmailLabel.UNKNOWN.value
+            row.label = EmailLabel.OTHERS.value
         if row.folder not in VALID_FOLDERS:
             row.folder = MailFolder.INBOX.value
 
@@ -93,7 +93,7 @@ def list_emails(
         label_q = label_q.filter(EmailMessage.mailbox_id == mailbox_id)
     label_counts = {item: 0 for item in valid}
     for lab, count in label_q.group_by(EmailMessage.label):
-        key = lab if lab in valid else EmailLabel.UNKNOWN.value
+        key = lab if lab in valid else EmailLabel.OTHERS.value
         label_counts[key] = label_counts.get(key, 0) + int(count)
 
     folder_q = _from_active_mailbox(db.query(EmailMessage.folder, func.count(EmailMessage.id)))
@@ -186,7 +186,7 @@ async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailMessag
     if not email.is_read:
         email.is_read = True
     if email.label not in {item.value for item in EmailLabel}:
-        email.label = EmailLabel.UNKNOWN.value
+        email.label = EmailLabel.OTHERS.value
     db.commit()
     db.refresh(email)
     return email

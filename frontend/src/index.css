@@ -1125,9 +1125,6 @@ body {
 .label-others {
   color: var(--muted);
 }
-.label-unknown {
-  color: #9aa7b8;
-}
 
 .avatar.soft.label-interview {
   background: #1d3a55;
@@ -1149,9 +1146,6 @@ body {
 }
 .avatar.soft.label-job_alert {
   background: #4a3018;
-}
-.avatar.soft.label-unknown {
-  background: #2a3140;
 }
 
 .hint {
