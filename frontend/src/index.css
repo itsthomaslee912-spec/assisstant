@@ -1475,12 +1475,12 @@ body {
   background: rgba(8, 10, 14, 0.55);
   display: grid;
   place-items: center;
-  padding: 1.25rem;
+  padding: clamp(0.75rem, 2vw, 1.5rem);
 }
 
 .settings-shell {
-  width: min(1080px, 100%);
-  height: min(760px, 100%);
+  width: min(1080px, calc(100vw - clamp(1.5rem, 4vw, 3rem)));
+  height: min(760px, calc(100dvh - clamp(1.5rem, 4vw, 3rem)));
   display: flex;
   flex-direction: column;
   border: 1px solid var(--line);
@@ -1495,7 +1495,7 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  padding: 0.9rem 1.1rem;
+  padding: 1rem 1.4rem;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1515,7 +1515,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  padding: 0.75rem;
+  padding: 1rem 0.75rem;
   border-right: 1px solid var(--line);
   background: var(--bg-pane);
 }
@@ -1532,7 +1532,8 @@ body {
   color: var(--muted);
   font: inherit;
   text-align: left;
-  padding: 0.5rem 0.65rem;
+  min-height: 2.5rem;
+  padding: 0.6rem 0.75rem;
   cursor: pointer;
 }
 
@@ -1549,12 +1550,13 @@ body {
 .settings-content {
   min-width: 0;
   overflow: auto;
-  padding: 1rem 1.15rem 1.4rem;
+  padding: clamp(1.1rem, 2.5vw, 1.75rem);
+  padding-bottom: 2rem;
 }
 
 .settings-panel {
   display: grid;
-  gap: 1.25rem;
+  gap: 1.5rem;
   min-width: 0;
 }
 
@@ -1568,7 +1570,7 @@ body {
 }
 
 .settings-help {
-  margin: 0 0 0.75rem;
+  margin: 0 0 1rem;
   color: var(--muted);
   font-size: 0.86rem;
   line-height: 1.4;
@@ -1687,7 +1689,7 @@ body {
 
 .settings-table th,
 .settings-table td {
-  padding: 0.55rem 0.7rem;
+  padding: 0.72rem 0.85rem;
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
@@ -1709,7 +1711,7 @@ body {
   flex-wrap: wrap;
   gap: 0.75rem 1rem;
   align-items: end;
-  margin-bottom: 1rem;
+  margin-bottom: 1.25rem;
 }
 
 .stats-form .settings-field,
@@ -1949,9 +1951,9 @@ body {
 .stats-visuals {
   display: grid;
   grid-template-columns: minmax(260px, 0.95fr) minmax(0, 1.15fr);
-  gap: 0.85rem;
+  gap: 1rem;
   align-items: stretch;
-  margin-top: 0.85rem;
+  margin-top: 1rem;
   min-width: 0;
 }
 
@@ -1972,7 +1974,7 @@ body {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--bg-card);
-  padding: 0.9rem 0.95rem 0.85rem;
+  padding: 1.15rem 1.2rem;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
@@ -2090,7 +2092,11 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.6rem;
-  margin-bottom: 0.7rem;
+  margin-bottom: 0.9rem;
+}
+
+.settings-block > .outcome-block {
+  margin-top: 1.35rem;
 }
 
 .stats-chart-wrap {
@@ -2179,6 +2185,10 @@ body {
     border-radius: 0;
   }
 
+  .settings-top {
+    padding: 0.85rem 1rem;
+  }
+
   .settings-body {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
@@ -2189,11 +2199,21 @@ body {
     overflow: auto;
     border-right: none;
     border-bottom: 1px solid var(--line);
+    padding: 0.6rem 0.75rem;
   }
 
   .settings-nav-btn {
     width: auto;
     white-space: nowrap;
+  }
+
+  .settings-content {
+    padding: 1rem;
+    padding-bottom: 1.5rem;
+  }
+
+  .stats-card {
+    padding: 1rem;
   }
 
   .stats-form {
