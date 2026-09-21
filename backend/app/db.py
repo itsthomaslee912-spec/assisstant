@@ -167,6 +167,15 @@ def init_db() -> None:
                         "ON email_messages (received_at, id)"
                     )
                 )
+            if "mailbox_connections" in tables:
+                mb_cols = {c["name"] for c in inspect(conn).get_columns("mailbox_connections")}
+                if "received_at_utc_fixed" not in mb_cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE mailbox_connections "
+                            "ADD COLUMN received_at_utc_fixed BOOLEAN DEFAULT 0"
+                        )
+                    )
             if "classify_corrections" in tables:
                 for old, new in LABEL_SLUG_REMAPS:
                     conn.execute(

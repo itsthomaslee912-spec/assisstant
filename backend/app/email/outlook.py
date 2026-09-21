@@ -131,9 +131,10 @@ def normalize_outlook_message(raw: dict) -> dict:
     received_at = None
     if received_raw:
         try:
-            received_at = datetime.fromisoformat(received_raw.replace("Z", "+00:00"))
-            if received_at.tzinfo is None:
-                received_at = received_at.replace(tzinfo=timezone.utc)
+            parsed = datetime.fromisoformat(str(received_raw).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            received_at = parsed.astimezone(timezone.utc)
         except Exception:
             received_at = None
 

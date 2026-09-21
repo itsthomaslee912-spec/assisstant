@@ -7,6 +7,7 @@ from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, Uniqu
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+from app.timeutil import UtcDateTime
 
 
 class Provider(str, Enum):
@@ -58,6 +59,8 @@ class MailboxConnection(Base):
     # Gmail history / Outlook delta cursors
     sync_cursor: Mapped[str | None] = mapped_column(String(512), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True)
+    # One-shot: received_at rewritten from provider UTC (fixes SQLite tz stripping)
+    received_at_utc_fixed: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -89,7 +92,7 @@ class EmailMessage(Base):
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject: Mapped[str] = mapped_column(String(998), default="")
     sender: Mapped[str] = mapped_column(String(512), default="")
-    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     snippet: Mapped[str] = mapped_column(Text, default="")
     body_text: Mapped[str] = mapped_column(Text, default="")
     body_html: Mapped[str] = mapped_column(Text, default="")

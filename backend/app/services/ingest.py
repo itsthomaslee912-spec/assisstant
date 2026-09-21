@@ -9,6 +9,7 @@ from app.email.folders import normalize_folder
 from app.models import EmailMessage, MailboxConnection
 from app.realtime.sse import publish
 from app.schemas import EmailOut
+from app.timeutil import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,16 @@ async def ingest_normalized_message(
         .one_or_none()
     )
     if existing is not None:
+        changed = False
         folder = normalize_folder(normalized.get("folder"))
         if existing.folder != folder:
             existing.folder = folder
+            changed = True
+        new_received = as_utc(normalized.get("received_at"))
+        if new_received is not None and existing.received_at != new_received:
+            existing.received_at = new_received
+            changed = True
+        if changed:
             db.commit()
         return None
 
@@ -62,7 +70,7 @@ async def ingest_normalized_message(
         thread_id=normalized.get("thread_id"),
         subject=normalized.get("subject") or "",
         sender=normalized.get("sender") or "",
-        received_at=normalized.get("received_at"),
+        received_at=as_utc(normalized.get("received_at")),
         snippet=(normalized.get("snippet") or "")[:1000],
         body_text=normalized.get("body_text") or "",
         body_html=normalized.get("body_html") or "",
@@ -75,5 +83,5 @@ async def ingest_normalized_message(
     db.commit()
     db.refresh(email)
 
-    await publish("email.classified", EmailOut.model_validate(email).model_dump())
+    await publish("email.classified", EmailOut.model_validate(email).model_dump(mode="json"))
     return email

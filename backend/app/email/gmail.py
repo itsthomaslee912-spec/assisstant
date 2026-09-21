@@ -132,12 +132,14 @@ async def gmail_get_messages(
     message_ids: list[str],
     *,
     concurrency: int = 4,
+    format: str = "full",
 ) -> list[dict]:
-    """Fetch full Gmail messages concurrently with retry on quota/5xx."""
+    """Fetch Gmail messages concurrently with retry on quota/5xx."""
     if not message_ids:
         return []
     sem = asyncio.Semaphore(max(1, concurrency))
     headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"format": format}
 
     def _is_quota(resp: httpx.Response) -> bool:
         if resp.status_code == 429:
@@ -154,7 +156,7 @@ async def gmail_get_messages(
                     resp = await client.get(
                         f"{GMAIL_API}/users/me/messages/{mid}",
                         headers=headers,
-                        params={"format": "full"},
+                        params=params,
                     )
                 except httpx.HTTPError:
                     if attempt == 7:
@@ -259,20 +261,24 @@ def normalize_gmail_message(raw: dict) -> dict:
     headers = payload.get("headers") or []
     subject = _header(headers, "Subject")
     sender = _header(headers, "From")
-    date_raw = _header(headers, "Date")
+    # Prefer internalDate: epoch ms in UTC, matches Gmail inbox time and
+    # avoids SQLite dropping Date-header timezone offsets on write.
     received_at = None
-    if date_raw:
-        try:
-            received_at = parsedate_to_datetime(date_raw)
-            if received_at.tzinfo is None:
-                received_at = received_at.replace(tzinfo=timezone.utc)
-        except Exception:
-            received_at = None
-    if received_at is None and raw.get("internalDate"):
+    if raw.get("internalDate"):
         try:
             received_at = datetime.fromtimestamp(int(raw["internalDate"]) / 1000, tz=timezone.utc)
         except Exception:
             received_at = None
+    if received_at is None:
+        date_raw = _header(headers, "Date")
+        if date_raw:
+            try:
+                parsed = parsedate_to_datetime(date_raw)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                received_at = parsed.astimezone(timezone.utc)
+            except Exception:
+                received_at = None
 
     body_text, body_html = _extract_parts(payload)
     if body_text and not body_html:
