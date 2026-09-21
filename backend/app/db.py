@@ -27,6 +27,104 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+LABEL_SLUG_REMAPS = (
+    ("tech", "assessment"),
+    ("available", "screening"),
+    ("alert", "job_alert"),
+    ("application_submitted", "applied"),
+    ("new_opportunity", "job_alert"),
+    ("recruiter_outreach", "job_alert"),
+    ("talent_pool", "others"),
+    ("company_news", "others"),
+    ("career_event", "others"),
+    ("profile_update_request", "others"),
+    ("withdrawn", "rejected"),
+    ("hired", "offer"),
+)
+
+_DROPPED_TAXONOMY_SLUGS = (
+    "application_submitted",
+    "new_opportunity",
+    "recruiter_outreach",
+    "talent_pool",
+    "company_news",
+    "career_event",
+    "profile_update_request",
+    "withdrawn",
+    "hired",
+)
+
+
+def seed_default_classify_prompt() -> None:
+    from app.classify.prompt import SYSTEM_PROMPT
+    from app.models import ClassifyPromptVersion
+
+    db = SessionLocal()
+    try:
+        exists = db.query(ClassifyPromptVersion.id).first()
+        if exists is None:
+            db.add(
+                ClassifyPromptVersion(
+                    prompt_text=SYSTEM_PROMPT,
+                    is_active=True,
+                    source="seed",
+                    example_count=0,
+                )
+            )
+            db.commit()
+    finally:
+        db.close()
+
+
+def _is_taxonomy_v3_prompt(text: str) -> bool:
+    if not text:
+        return False
+    if "- unknown" not in text and "unknown —" not in text:
+        return False
+    if any(f"- {slug}" in text for slug in _DROPPED_TAXONOMY_SLUGS):
+        return False
+    from app.models import EmailLabel
+
+    return all(item.value in text for item in EmailLabel)
+
+
+def ensure_taxonomy_v3_prompt() -> bool:
+    """Activate the nine-label SYSTEM_PROMPT when the live prompt is still v2.
+
+    Does not start a reclassify job. Returns True only when a new version was inserted.
+    """
+    from app.classify.prompt import SYSTEM_PROMPT
+    from app.classify.prompt_store import activate_prompt_text
+    from app.models import ClassifyPromptVersion
+
+    db = SessionLocal()
+    try:
+        active = (
+            db.query(ClassifyPromptVersion)
+            .filter(ClassifyPromptVersion.is_active.is_(True))
+            .order_by(ClassifyPromptVersion.id.desc())
+            .first()
+        )
+        text = (active.prompt_text if active else "") or ""
+        if _is_taxonomy_v3_prompt(text):
+            return False
+        if active is not None:
+            active.is_active = False
+        db.add(
+            ClassifyPromptVersion(
+                prompt_text=SYSTEM_PROMPT,
+                is_active=True,
+                source="taxonomy_v3",
+                example_count=0,
+            )
+        )
+        db.commit()
+        activate_prompt_text(SYSTEM_PROMPT)
+        return True
+    finally:
+        db.close()
+
+
 def init_db() -> None:
     from app import models  # noqa: F401
     from sqlalchemy import inspect, text
@@ -43,16 +141,55 @@ def init_db() -> None:
                     conn.execute(text("ALTER TABLE email_messages ADD COLUMN body_html TEXT DEFAULT ''"))
                 if "is_read" not in cols:
                     conn.execute(text("ALTER TABLE email_messages ADD COLUMN is_read BOOLEAN DEFAULT 0"))
-                conn.execute(
-                    text("UPDATE email_messages SET label = 'assessment' WHERE label = 'tech'")
-                )
+                if "human_corrected" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE email_messages ADD COLUMN human_corrected BOOLEAN DEFAULT 0"
+                        )
+                    )
+                if "folder" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE email_messages ADD COLUMN folder VARCHAR(16) DEFAULT 'inbox'"
+                        )
+                    )
+                    conn.execute(
+                        text("UPDATE email_messages SET folder = 'inbox' WHERE folder IS NULL")
+                    )
+                for old, new in LABEL_SLUG_REMAPS:
+                    conn.execute(
+                        text("UPDATE email_messages SET label = :new WHERE label = :old"),
+                        {"new": new, "old": old},
+                    )
                 conn.execute(
                     text(
                         "CREATE INDEX IF NOT EXISTS ix_email_messages_received_id "
                         "ON email_messages (received_at, id)"
                     )
                 )
+            if "classify_corrections" in tables:
+                for old, new in LABEL_SLUG_REMAPS:
+                    conn.execute(
+                        text(
+                            "UPDATE classify_corrections SET previous_label = :new "
+                            "WHERE previous_label = :old"
+                        ),
+                        {"new": new, "old": old},
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE classify_corrections SET corrected_label = :new "
+                            "WHERE corrected_label = :old"
+                        ),
+                        {"new": new, "old": old},
+                    )
         with engine.connect() as conn:
             conn.execute(text("PRAGMA journal_mode=WAL"))
             conn.execute(text("PRAGMA busy_timeout=60000"))
             conn.commit()
+
+    seed_default_classify_prompt()
+    from app.services.mailbox_cleanup import purge_orphaned_mailbox_mail
+
+    purge_orphaned_mailbox_mail()
+    ensure_taxonomy_v3_prompt()

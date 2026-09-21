@@ -78,10 +78,10 @@ def test_sagent_is_applied():
 
 
 def test_rules_iq_jd_is_alert():
-    assert _heuristic_label("Datacenter Technician", "Atul Singh", RULES_IQ, "") == EmailLabel.ALERT.value
+    assert _heuristic_label("Datacenter Technician", "Atul Singh", RULES_IQ, "") == EmailLabel.JOB_ALERT.value
     assert (
         apply_label_guards(EmailLabel.INTERVIEW.value, subject="", sender="", body_text=RULES_IQ, snippet="")
-        == EmailLabel.ALERT.value
+        == EmailLabel.JOB_ALERT.value
     )
 
 
@@ -138,3 +138,198 @@ def test_stackadapt_not_moving_forward_is_rejected():
         apply_label_guards(EmailLabel.APPLIED.value, subject="", sender="", body_text=STACKADAPT, snippet="")
         == EmailLabel.REJECTED.value
     )
+
+
+MOTLEY_FOOL = """Dear Thomas,
+
+Thank you for submitting your application! We have received all of your materials for Product Tech Lead.
+
+Here at The Motley Fool, we strive to not only make the company a great place to work, but we also want to make the application process fun and enjoyable, which means you don’t have to worry about your application being sucked into a black hole. We’ve got it; we promise!
+
+Someone from our recruiting team will reach out when your application is processed.
+
+Sincerely,
+The Motley Fool Recruiting Team
+
+** Please note: Do not reply to this email. This email is sent from an unattended mailbox. Replies will not be read.
+"""
+
+STRIIM = """Hello Thomas,
+
+Thanks for applying to Striim, Inc.. Your application has been received, and we will review it right away.
+
+If your application seems like a good fit for the position we will contact you soon.
+
+Regards,
+Striim, Inc.
+
+** Please note: Do not reply to this email. This email is sent from an unattended mailbox. Replies will not be read.
+"""
+
+DATABRICKS = """Hi Thomas,
+
+Thanks for applying to Databricks! Your application for the Sr. Solutions Engineer - Digital Native Business, Named Accounts role has been received. We will review it shortly and reach out if there is a fit.
+
+Please note that all official communication from Databricks will come from email addresses ending with @databricks.com or @goodtime.io (our meeting tool).
+
+Regards,
+Databricks
+
+** Please note: Do not reply to this email. This email is sent from an unattended mailbox. Replies will not be read.
+"""
+
+
+def test_motley_fool_receipt_is_applied():
+    assert _heuristic_label("", "The Motley Fool", MOTLEY_FOOL, "") == EmailLabel.APPLIED.value
+    assert (
+        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=MOTLEY_FOOL, snippet="")
+        == EmailLabel.APPLIED.value
+    )
+
+
+def test_striim_receipt_is_applied():
+    assert _heuristic_label("", "Striim", STRIIM, "") == EmailLabel.APPLIED.value
+    assert (
+        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=STRIIM, snippet="")
+        == EmailLabel.APPLIED.value
+    )
+
+
+def test_databricks_receipt_is_applied():
+    assert _heuristic_label("", "Databricks", DATABRICKS, "") == EmailLabel.APPLIED.value
+    assert (
+        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=DATABRICKS, snippet="")
+        == EmailLabel.APPLIED.value
+    )
+
+
+CLOUDBEDS = """Hi Jordan,
+
+Thank you for applying for the Senior Software Engineer - Workflow role. We genuinely appreciate the time you invested in your application. After carefully reviewing your background, we've decided to move forward with candidates whose experience aligns more directly to what this specific role needs.
+
+We're growing fast, and new roles open up regularly. When you see something that feels like a better match, we genuinely want to hear from you again. Keep an eye on Cloudbeds Careers and follow our LinkedIn  page to stay informed about future opportunities.
+
+Thank you again for considering Cloudbeds. We're wishing you the best in your search.
+
+Best Regards,
+
+The Talent Acquisition Team @ Cloudbeds
+
+Please note: per company policy, we are unable to provide individual application feedback to candidates at this stage in the process.
+"""
+
+
+def test_cloudbeds_is_rejected():
+    assert _heuristic_label("", "Cloudbeds", CLOUDBEDS, "") == EmailLabel.REJECTED.value
+    assert (
+        apply_label_guards(EmailLabel.APPLIED.value, subject="", sender="", body_text=CLOUDBEDS, snippet="")
+        == EmailLabel.REJECTED.value
+    )
+
+
+PRINCIPAL_REQUIREMENT = """Hi,
+
+Please find the requirement below, if you find yourself comfortable with the requirement please reply with your updated resume and I will get back to you.
+
+Title- Sr. Software Engineer
+Location- Remote or Hybrid Des Moines, IA
+Duration – 6+ Month
+Interview – Video
+
+Client - Principal Financial
+
+They are looking for more of a Software Engineer/Doer in this space.  Their job description is awful and they’ve titled it a Sr. Software Engineer.
+Below is the job description, I actually have 3 openings.
+
+Process Account Password Changes
+
+This effort requires changing passwords for process accounts and updating each associated application's configuration to use the new credentials.  A process account is simply a non-human account that is used to run processes, batch jobs, etc.  In our current state, we have many shared accounts that are used across multiple applications, and part of this effort will be to break those into individual dedicated accounts.   The new accounts will need to be created and each app reconfigured to use its own.  This role will be given patterns to follow to complete the work and be accountable to make the changes and prepare pull requests for the owning teams to approve.
+"""
+
+
+def test_requirement_dump_is_alert():
+    assert _heuristic_label("", "Recruiter", PRINCIPAL_REQUIREMENT, "") == EmailLabel.JOB_ALERT.value
+    assert (
+        apply_label_guards(EmailLabel.SCREENING.value, subject="", sender="", body_text=PRINCIPAL_REQUIREMENT, snippet="")
+        == EmailLabel.JOB_ALERT.value
+    )
+
+
+EVERPURE = """Hi Thomas,
+
+Thank you so much for taking the time to apply for the Senior Full Stack Software Engineer, DX role. We know a lot of thought and consideration went into your application, and we genuinely appreciate your interest in joining the team here at Everpure (formerly Pure Storage). Unfortunately, we have made the decision to move forward with other candidates whose experience more closely aligns with our team's needs.
+
+Thanks again for your interest in Everpure (formerly Pure Storage)! We wish you the best of luck in your current search.
+
+Regards,
+
+The Recruiting Team at Everpure (formerly Pure Storage)
+"""
+
+
+def test_everpure_is_rejected():
+    assert _heuristic_label("", "Everpure", EVERPURE, "") == EmailLabel.REJECTED.value
+    assert (
+        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=EVERPURE, snippet="")
+        == EmailLabel.REJECTED.value
+    )
+
+
+CLEARLINK = """Hello Thomas,
+
+Thank you for your interest in the Senior Software Engineer, Wordpress position here at Clearlink. At this time, this position is not available in your current location. If the position you applied for is listed as remote, please note that Clearlink is only registered to hire employees in specific locations, regardless of if the position is remote, hybrid, or in-office.
+
+We encourage you to keep an eye out for future opportunities with us; follow us on social media and check out our careers page for more opportunities - we post new ones regularly!
+
+Thank you for considering us as part of your journey.
+
+Kind regards,
+
+Clearlink Recruiting
+"""
+
+
+def test_clearlink_location_is_rejected():
+    assert _heuristic_label("", "Clearlink", CLEARLINK, "") == EmailLabel.REJECTED.value
+    assert (
+        apply_label_guards(EmailLabel.APPLIED.value, subject="", sender="", body_text=CLEARLINK, snippet="")
+        == EmailLabel.REJECTED.value
+    )
+
+
+CROSSCOUNTRY = """Hi Thomas,
+Thank you for your interest in CrossCountry Consulting and for considering us as a possible next step in your career.
+
+After reviewing your application, our team has decided to proceed with other candidates who better align with our current hiring needs. We will contact you for future opportunities based on changes in the market or shifts in our hiring needs.
+
+We wish you all the best in your job search and professional endeavors.
+
+Best,
+The CrossCountry Consulting Talent Team
+LinkedIn| Facebook | Glassdoor
+"""
+
+
+def test_crosscountry_is_rejected():
+    assert _heuristic_label("", "CrossCountry", CROSSCOUNTRY, "") == EmailLabel.REJECTED.value
+    assert (
+        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=CROSSCOUNTRY, snippet="")
+        == EmailLabel.REJECTED.value
+    )
+
+
+def test_system_prompt_lists_every_label():
+    from app.classify.openai_classifier import normalize_label
+    from app.classify.prompt import CLASSIFY_TYPES, SYSTEM_PROMPT
+
+    slugs = {item.value for item in EmailLabel}
+    assert {item.slug for item in CLASSIFY_TYPES} == slugs
+    assert EmailLabel.UNKNOWN.value in slugs
+    for slug in slugs:
+        assert slug in SYSTEM_PROMPT
+    assert normalize_label("applied") == EmailLabel.APPLIED.value
+    assert normalize_label("application_submitted") == EmailLabel.APPLIED.value
+    assert normalize_label("alert") == EmailLabel.JOB_ALERT.value
+    assert normalize_label("available") == EmailLabel.SCREENING.value
+    assert normalize_label("tech") == EmailLabel.ASSESSMENT.value
+    assert normalize_label("not_a_label") == EmailLabel.UNKNOWN.value

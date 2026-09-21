@@ -12,18 +12,21 @@ from app.config import get_settings
 from app.email.gmail import (
     gmail_get_message,
     gmail_get_messages,
+    gmail_list_folder_id_map,
     gmail_list_history,
     gmail_list_inbox_message_ids,
     normalize_gmail_message,
 )
+from app.email.folders import folder_from_outlook_well_known
 from app.email.outlook import (
     normalize_outlook_message,
+    outlook_attach_folder,
     outlook_get_message,
     outlook_list_recent,
 )
 from app.models import EmailMessage, MailboxConnection, Provider
 from app.realtime.gmail_watch import start_gmail_watch
-from app.realtime.outlook_subscriptions import create_outlook_subscription
+from app.realtime.outlook_subscriptions import create_outlook_subscription, parse_outlook_subscription_ids
 from app.realtime.sse import publish
 from app.services.ingest import ingest_normalized_message
 
@@ -34,7 +37,12 @@ GMAIL_CONCURRENCY = 4
 
 _jobs: dict[int, dict[str, Any]] = {}
 _running: set[int] = set()
+_cancel_requested: set[int] = set()
 _job_lock = asyncio.Lock()
+
+
+def _should_stop(mailbox_id: int) -> bool:
+    return mailbox_id in _cancel_requested
 
 
 def get_sync_status(mailbox_id: int) -> dict[str, Any]:
@@ -67,6 +75,7 @@ async def start_mailbox_sync(mailbox_id: int) -> dict[str, Any]:
         current = _jobs.get(mailbox_id)
         if mailbox_id in _running or (current and current.get("state") == "running"):
             return get_sync_status(mailbox_id)
+        _cancel_requested.discard(mailbox_id)
         _running.add(mailbox_id)
         job = _set_job(
             mailbox_id,
@@ -79,6 +88,16 @@ async def start_mailbox_sync(mailbox_id: int) -> dict[str, Any]:
             message="Starting inbox sync...",
         )
     asyncio.create_task(_run_sync_job(mailbox_id))
+    return dict(job)
+
+
+async def request_stop_sync(mailbox_id: int) -> dict[str, Any]:
+    async with _job_lock:
+        if mailbox_id not in _running:
+            return get_sync_status(mailbox_id)
+        _cancel_requested.add(mailbox_id)
+        job = _set_job(mailbox_id, message="Stopping sync…")
+    await publish("sync.progress", dict(job))
     return dict(job)
 
 
@@ -97,11 +116,19 @@ async def _run_sync_job(mailbox_id: int) -> None:
             await publish("sync.done", get_sync_status(mailbox_id))
             return
         await bootstrap_mailbox(db, mailbox)
-        job = _set_job(
-            mailbox_id,
-            state="done",
-            message=f"Synced {_jobs[mailbox_id].get('imported', 0)} new messages",
-        )
+        imported = _jobs[mailbox_id].get("imported", 0)
+        if _should_stop(mailbox_id):
+            job = _set_job(
+                mailbox_id,
+                state="stopped",
+                message=f"Sync stopped — imported {imported} new messages",
+            )
+        else:
+            job = _set_job(
+                mailbox_id,
+                state="done",
+                message=f"Synced {imported} new messages",
+            )
         await publish("sync.done", dict(job))
     except Exception as exc:
         logger.exception("Mailbox sync failed for %s", mailbox_id)
@@ -109,6 +136,7 @@ async def _run_sync_job(mailbox_id: int) -> None:
         await publish("sync.done", dict(job))
     finally:
         _running.discard(mailbox_id)
+        _cancel_requested.discard(mailbox_id)
         db.close()
 
 
@@ -116,6 +144,8 @@ async def bootstrap_mailbox(db: Session, mailbox: MailboxConnection, *, initial_
     limit = initial_sync if initial_sync is not None else get_settings().mail_sync_max
     if mailbox.provider == Provider.GOOGLE.value:
         await _sync_gmail(db, mailbox, limit)
+        if _should_stop(mailbox.id):
+            return
         try:
             token = await ensure_google_access_token(db, mailbox)
             await start_gmail_watch(db, mailbox, token)
@@ -123,6 +153,8 @@ async def bootstrap_mailbox(db: Session, mailbox: MailboxConnection, *, initial_
             logger.exception("Gmail watch registration failed for mailbox %s", mailbox.id)
     elif mailbox.provider == Provider.MICROSOFT.value:
         await _sync_outlook(db, mailbox, limit)
+        if _should_stop(mailbox.id):
+            return
         try:
             token = await ensure_microsoft_access_token(db, mailbox)
             await create_outlook_subscription(db, mailbox, token)
@@ -131,12 +163,45 @@ async def bootstrap_mailbox(db: Session, mailbox: MailboxConnection, *, initial_
 
 
 async def _existing_ids(db: Session, mailbox_id: int) -> set[str]:
-    rows = (
-        db.query(EmailMessage.provider_message_id)
-        .filter(EmailMessage.mailbox_id == mailbox_id)
-        .all()
-    )
-    return {row[0] for row in rows}
+    rows = db.query(EmailMessage.provider_message_id).filter(EmailMessage.mailbox_id == mailbox_id).all()
+    return {row[0] for row in rows if row[0]}
+
+
+def _stamp_listed_outlook_folders(db: Session, mailbox_id: int, messages: list[dict]) -> None:
+    id_to_folder = {
+        str(raw["id"]): folder_from_outlook_well_known(str(raw.get("_mail_folder") or "inbox"))
+        for raw in messages
+        if raw.get("id")
+    }
+    _apply_folder_stamps(db, mailbox_id, id_to_folder)
+
+
+def _stamp_listed_gmail_folders(db: Session, mailbox_id: int, id_to_folder: dict[str, str]) -> None:
+    _apply_folder_stamps(db, mailbox_id, id_to_folder)
+
+
+def _apply_folder_stamps(db: Session, mailbox_id: int, id_to_folder: dict[str, str]) -> None:
+    if not id_to_folder:
+        return
+    ids = list(id_to_folder)
+    changed = False
+    for start in range(0, len(ids), 400):
+        chunk = ids[start : start + 400]
+        rows = (
+            db.query(EmailMessage)
+            .filter(
+                EmailMessage.mailbox_id == mailbox_id,
+                EmailMessage.provider_message_id.in_(chunk),
+            )
+            .all()
+        )
+        for row in rows:
+            next_folder = id_to_folder.get(row.provider_message_id)
+            if next_folder and row.folder != next_folder:
+                row.folder = next_folder
+                changed = True
+    if changed:
+        db.commit()
 
 
 async def _publish_progress(mailbox_id: int, **fields: Any) -> None:
@@ -146,9 +211,12 @@ async def _publish_progress(mailbox_id: int, **fields: Any) -> None:
 
 async def _sync_gmail(db: Session, mailbox: MailboxConnection, limit: int) -> None:
     token = await ensure_google_access_token(db, mailbox)
-    await _publish_progress(mailbox.id, state="running", message="Listing Inbox...")
+    await _publish_progress(mailbox.id, state="running", message="Listing Inbox, Spam, Trash, and Archive...")
     ids, estimate = await gmail_list_inbox_message_ids(token, max_results=limit)
     existing = await _existing_ids(db, mailbox.id)
+    if existing:
+        folder_map = await gmail_list_folder_id_map(token, max_results=limit)
+        _stamp_listed_gmail_folders(db, mailbox.id, folder_map)
     new_ids = [mid for mid in ids if mid not in existing]
     imported = 0
     failed = 0
@@ -171,6 +239,17 @@ async def _sync_gmail(db: Session, mailbox: MailboxConnection, limit: int) -> No
     )
 
     for start in range(0, len(new_ids), FETCH_CHUNK):
+        if _should_stop(mailbox.id):
+            await _publish_progress(
+                mailbox.id,
+                imported=imported,
+                failed=failed,
+                skipped=len(ids) - len(new_ids),
+                listed=len(ids),
+                total=max(estimate, len(ids)),
+                message="Stopping sync…",
+            )
+            return
         token = await ensure_google_access_token(db, mailbox)
         chunk = new_ids[start : start + FETCH_CHUNK]
         raws = await gmail_get_messages(token, chunk, concurrency=GMAIL_CONCURRENCY)
@@ -181,7 +260,7 @@ async def _sync_gmail(db: Session, mailbox: MailboxConnection, limit: int) -> No
                 failed += 1
                 continue
             email = await ingest_normalized_message(
-                db, mailbox, normalize_gmail_message(raw), use_openai=False
+                db, mailbox, normalize_gmail_message(raw)
             )
             if email:
                 imported += 1
@@ -209,9 +288,10 @@ async def _sync_gmail(db: Session, mailbox: MailboxConnection, limit: int) -> No
 
 async def _sync_outlook(db: Session, mailbox: MailboxConnection, limit: int) -> None:
     token = await ensure_microsoft_access_token(db, mailbox)
-    await _publish_progress(mailbox.id, state="running", message="Listing Inbox...")
+    await _publish_progress(mailbox.id, state="running", message="Listing Inbox, Junk, Deleted Items, and Archive...")
     messages = await outlook_list_recent(token, top=limit)
     existing = await _existing_ids(db, mailbox.id)
+    _stamp_listed_outlook_folders(db, mailbox.id, messages)
     new_messages = [raw for raw in messages if (raw.get("id") or "") not in existing]
     imported = 0
     await _publish_progress(
@@ -224,8 +304,18 @@ async def _sync_outlook(db: Session, mailbox: MailboxConnection, limit: int) -> 
         message=f"Importing {len(new_messages)} new messages...",
     )
     for raw in new_messages:
+        if _should_stop(mailbox.id):
+            await _publish_progress(
+                mailbox.id,
+                imported=imported,
+                skipped=len(messages) - len(new_messages),
+                listed=len(messages),
+                total=len(messages),
+                message="Stopping sync…",
+            )
+            return
         email = await ingest_normalized_message(
-            db, mailbox, normalize_outlook_message(raw), use_openai=False
+            db, mailbox, normalize_outlook_message(raw)
         )
         if email:
             imported += 1
@@ -280,6 +370,9 @@ async def process_gmail_notification(db: Session, email_address: str, history_id
         for item in history.get("history") or []:
             for added in item.get("messagesAdded") or []:
                 msg = added.get("message") or {}
+                labels = {str(label).upper() for label in (msg.get("labelIds") or [])}
+                if labels & {"SENT", "DRAFT"}:
+                    continue
                 mid = msg.get("id")
                 if mid:
                     message_ids.append(mid)
@@ -300,7 +393,7 @@ async def process_gmail_notification(db: Session, email_address: str, history_id
 async def process_outlook_notification(db: Session, subscription_id: str, message_id: str) -> int:
     mailbox = None
     for conn in db.query(MailboxConnection).filter(MailboxConnection.is_active.is_(True)).all():
-        if conn.webhook and conn.webhook.external_id == subscription_id:
+        if conn.webhook and subscription_id in parse_outlook_subscription_ids(conn.webhook.external_id):
             mailbox = conn
             break
     if mailbox is None:
@@ -318,5 +411,6 @@ async def process_outlook_notification(db: Session, subscription_id: str, messag
 
     token = await ensure_microsoft_access_token(db, mailbox)
     raw = await outlook_get_message(token, message_id)
+    raw = await outlook_attach_folder(token, raw)
     email = await ingest_normalized_message(db, mailbox, normalize_outlook_message(raw))
     return 1 if email else 0

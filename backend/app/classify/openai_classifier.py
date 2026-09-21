@@ -1,81 +1,41 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from openai import AsyncOpenAI
 
+from app.classify.prompt_store import get_active_system_prompt
 from app.config import get_settings
 from app.models import EmailLabel
 from app.schemas import ClassificationResult
+
+logger = logging.getLogger(__name__)
 
 VALID_LABELS = {label.value for label in EmailLabel}
 
 LEGACY_LABEL_MAP = {
     "tech": EmailLabel.ASSESSMENT.value,
+    "available": EmailLabel.SCREENING.value,
+    "alert": EmailLabel.JOB_ALERT.value,
+    "application_submitted": EmailLabel.APPLIED.value,
+    "new_opportunity": EmailLabel.JOB_ALERT.value,
+    "recruiter_outreach": EmailLabel.JOB_ALERT.value,
+    "talent_pool": EmailLabel.OTHERS.value,
+    "company_news": EmailLabel.OTHERS.value,
+    "career_event": EmailLabel.OTHERS.value,
+    "profile_update_request": EmailLabel.OTHERS.value,
+    "withdrawn": EmailLabel.REJECTED.value,
+    "hired": EmailLabel.OFFER.value,
 }
-
-SYSTEM_PROMPT = """You classify recruiting / job-search emails into exactly ONE label.
-
-Labels:
-
-1) rejected
-   - Explicit rejection of THIS candidate / not moving forward / another candidate selected.
-   - Also: application cap / “we will not be able to move forward with your most recent
-     application” / “you have reached that limit” — even if they thank you for applying.
-
-2) interview
-   - ONLY when THIS candidate already has (or is being asked to book) an interview NOW.
-   - Examples: "you are confirmed for your interview on Wednesday", "please book a time",
-     "I'll call you at … for your interview", calendar/Zoom link for THEIR interview.
-   - Confirmations and reminders of a booked interview still count as interview.
-   - Do NOT use interview for:
-     * "if we'd like to schedule an interview" / "if your qualifications meet, we will
-       get in touch to schedule an interview" (that is applied).
-     * Job descriptions that list "Mode of Interview: MS Teams" or F2F rounds (that is alert).
-     * Screening questionnaires sent BEFORE any interview is booked (that is available).
-
-3) assessment
-   - Coding test / HackerRank / Codility / take-home / online assessment for THIS candidate.
-
-4) applied
-   - Confirmation that THIS candidate's application was received / is under review
-     AFTER they applied. Not cold outreach.
-   - Examples: "thank you for your interest in joining … we have received several applications",
-     "thanks for taking the time to apply … we'll be in touch if we'd like to schedule an interview".
-
-5) alert  ← default for most job-related marketing / cold mail
-   - Job alerts, digests, newsletters, unsubscribe footers from job portals.
-   - Cold recruiter / staffing outreach that pastes a Job Description.
-   - Role dump with Location / Duration / Mode of Interview / Preferred Skills.
-   - "Should you be interested, please send your resume".
-
-6) available
-   - Personalized outreach about a specific role for THIS candidate, still in screening —
-     not yet an interview on the calendar.
-   - Recruiter asks screening / experience questions ("thanks for your interest in the
-     X role", "before scheduling a recruiter interview, reply with answers").
-   - When it is a cold JD blast / job-portal sourcing → alert, not available.
-
-7) others
-   - Non-recruiting mail.
-
-Critical rules:
-- Word "interview" inside a Job Description ≠ label interview.
-- "Before scheduling an interview, answer these questions" ≠ interview → available.
-- "Thanks for applying / we received your application / we may schedule later" → applied.
-- "Will not be able to move forward with your application" / application-limit cap → rejected.
-- Cold JD + location/duration/"mode of interview" → alert.
-- Prefer alert over interview / available whenever the email is pitching a role to apply.
-- Respond JSON only: {"label":"<one label>","confidence":0.0-1.0}
-"""
 
 
 def normalize_label(raw: str) -> str:
-    label = raw.lower().strip()
+    label = raw.lower().strip().replace(" ", "_")
     label = LEGACY_LABEL_MAP.get(label, label)
     if label not in VALID_LABELS:
-        return EmailLabel.OTHERS.value
+        return EmailLabel.UNKNOWN.value
     return label
 
 
@@ -86,13 +46,13 @@ def _parse_label(content: str) -> tuple[str, float | None]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
-            return EmailLabel.OTHERS.value, None
+            return EmailLabel.UNKNOWN.value, None
         try:
             data = json.loads(match.group(0))
         except json.JSONDecodeError:
-            return EmailLabel.OTHERS.value, None
+            return EmailLabel.UNKNOWN.value, None
 
-    label = normalize_label(str(data.get("label", EmailLabel.OTHERS.value)))
+    label = normalize_label(str(data.get("label", EmailLabel.UNKNOWN.value)))
     confidence = data.get("confidence")
     try:
         confidence_f = float(confidence) if confidence is not None else None
@@ -102,7 +62,8 @@ def _parse_label(content: str) -> tuple[str, float | None]:
 
 
 def _combined_text(subject: str, sender: str, body_text: str, snippet: str) -> str:
-    return f"{subject}\n{sender}\n{snippet}\n{body_text}".lower()
+    raw = f"{subject}\n{sender}\n{snippet}\n{body_text}".lower()
+    return raw.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
 
 
 def _is_pre_interview_screen(text: str) -> bool:
@@ -141,10 +102,13 @@ def _is_application_received(text: str) -> bool:
     if _looks_like_cold_jd_blast(text) or _is_true_rejection(text):
         return False
     receipts = [
-        r"\bthank you for (taking the time to )?apply\b",
-        r"\bthanks for (taking the time to )?apply\b",
-        r"\bwe have received (your application|several applications)\b",
-        r"\breceived your application\b",
+        r"\bthank you for (taking the time to )?apply(ing)?\b",
+        r"\bthanks for (taking the time to )?apply(ing)?\b",
+        r"\bthank(s| you) for submitting your application\b",
+        r"\bwe have received (your application|several applications|all of your materials)\b",
+        r"\breceived (all of )?your (application|materials)\b",
+        r"\byour application\b.{0,160}\bhas been received\b",
+        r"\bapplication has been received\b",
         r"\bnow that we have your application\b",
         r"\bwe('ll| will) be in touch\b.*\bschedule an interview\b",
         r"\bif (we('d| would) like to|your qualifications meet)\b",
@@ -189,7 +153,6 @@ def _is_true_interview_invite(text: str) -> bool:
         r"\byour\s+interview\s+(is|has been|will be)\b",
         r"\binterview\s+(invitation|invite)\b",
         r"\bplease\s+(join|attend)\s+(the|your)\s+interview\b",
-        r"\bphone\s+screen\s+(with|on|tomorrow|today|at)\b",
         r"\bcalendar\s+invite\b.*\binterview\b",
         r"\bi('ll| will) call you\b.*\binterview\b",
         r"\binterview\b.*\bi('ll| will) call you\b",
@@ -211,8 +174,42 @@ def _is_true_rejection(text: str) -> bool:
         r"\bwill\s+not\s+be\s+progressing\b",
         r"\bnot been selected\b",
         r"\byou have not been selected to move forward\b",
+        r"\bwe(?:['’]ve|\s+have) decided to move forward\b",
+        r"\b(?:have\s+)?made the decision to move forward\b",
+        r"\bmov(?:e|ing)\s+forward\s+with\s+(?:other\s+)?candidates\b",
+        r"\bexperience aligns more directly\b",
+        r"\bexperience more closely aligns\b",
+        r"\baligns more directly to what this (?:specific )?role needs\b",
+        r"\bunfortunately\b.{0,240}\bmove forward\b",
+        r"\b(?:this )?(?:position|role|job) is not available in your (?:current )?location\b",
+        r"\bnot available in your (?:current )?location\b",
+        r"\bonly registered to hire\b",
+        r"\b(?:we are|are only) registered to hire employees in specific locations\b",
+        r"\bcannot hire (?:you )?in your (?:current )?location\b",
+        r"\bnot (?:able|eligible) to hire (?:you )?(?:in|from) your (?:current )?location\b",
+        r"\bproceed with (?:other\s+)?candidates\b",
+        r"\bdecided to proceed with (?:other\s+)?candidates\b",
+        r"\bbetter align with our current hiring needs\b",
     ]
     return any(re.search(p, text) for p in patterns)
+
+
+def _is_true_screening(text: str) -> bool:
+    """Booked recruiter/phone screen — not a technical/behavioral interview."""
+    if _is_application_received(text) or _looks_like_cold_jd_blast(text):
+        return False
+    if _is_true_rejection(text):
+        return False
+    return any(
+        re.search(p, text)
+        for p in [
+            r"\bphone\s+screen\b",
+            r"\brecruiter\s+screen\b",
+            r"\bscreening\s+call\b",
+            r"\bschedule\s+a\s+(quick\s+)?(intro|introductory|recruiter)\s+call\b",
+            r"\blet'?s\s+schedule\s+a\s+(quick\s+)?call\b",
+        ]
+    )
 
 
 def _is_true_assessment(text: str) -> bool:
@@ -265,6 +262,13 @@ def _looks_like_cold_jd_blast(text: str) -> bool:
         "if interested",
         "share your resume",
         "forward your resume",
+        "updated resume",
+        "reply with your updated resume",
+        "reply with your resume",
+        "please reply with your",
+        "find the requirement",
+        "please find the requirement",
+        "if you find yourself comfortable",
         "asap",
     ]
     sourcing_markers = [
@@ -282,7 +286,19 @@ def _looks_like_cold_jd_blast(text: str) -> bool:
     has_mode = "mode of interview" in text and ("job description" in text or "location" in text)
     has_ask = any(m in text for m in ask_markers)
     has_sourcing = any(m in text for m in sourcing_markers)
-    return has_mode or has_structure or (has_jd and (has_ask or has_sourcing))
+    has_req_fields = bool(
+        re.search(r"\btitle\s*[-:]", text)
+        and re.search(r"\blocation\s*[-:]", text)
+        and re.search(r"\bduration\s*[-:]", text)
+    )
+    has_openings = bool(re.search(r"\b\d+\s+openings?\b", text))
+    return (
+        has_mode
+        or has_structure
+        or has_req_fields
+        or (has_jd and (has_ask or has_sourcing or has_openings))
+        or (has_ask and has_req_fields)
+    )
 
 
 def _heuristic_label(subject: str, sender: str, body_text: str, snippet: str) -> str | None:
@@ -293,7 +309,7 @@ def _heuristic_label(subject: str, sender: str, body_text: str, snippet: str) ->
     if _is_application_received(text):
         return EmailLabel.APPLIED.value
     if _looks_like_cold_jd_blast(text):
-        return EmailLabel.ALERT.value
+        return EmailLabel.JOB_ALERT.value
 
     alert_signals = [
         "jobs that might interest you",
@@ -316,12 +332,12 @@ def _heuristic_label(subject: str, sender: str, body_text: str, snippet: str) ->
         "wish to be contacted for job opportunities",
     ]
     if any(s in text for s in alert_signals):
-        return EmailLabel.ALERT.value
+        return EmailLabel.JOB_ALERT.value
 
     if _is_true_assessment(text):
         return EmailLabel.ASSESSMENT.value
-    if _is_pre_interview_screen(text):
-        return EmailLabel.AVAILABLE.value
+    if _is_pre_interview_screen(text) or _is_true_screening(text):
+        return EmailLabel.SCREENING.value
     if _is_true_interview_invite(text):
         return EmailLabel.INTERVIEW.value
     return None
@@ -342,12 +358,16 @@ def apply_label_guards(
         return EmailLabel.REJECTED.value
     if heuristic == EmailLabel.APPLIED.value:
         return EmailLabel.APPLIED.value
-    if heuristic == EmailLabel.ALERT.value:
-        return EmailLabel.ALERT.value
+    if heuristic == EmailLabel.JOB_ALERT.value:
+        return EmailLabel.JOB_ALERT.value
     if heuristic == EmailLabel.INTERVIEW.value:
         return EmailLabel.INTERVIEW.value
-    if _is_pre_interview_screen(text) and label == EmailLabel.INTERVIEW.value:
-        return EmailLabel.AVAILABLE.value
+    if heuristic == EmailLabel.SCREENING.value:
+        return EmailLabel.SCREENING.value
+    if label == EmailLabel.INTERVIEW.value and (
+        _is_pre_interview_screen(text) or _is_true_screening(text)
+    ):
+        return EmailLabel.SCREENING.value
     return label
 
 
@@ -363,16 +383,16 @@ async def classify_email(
     heuristic = _heuristic_label(subject, sender, body_text, snippet)
     settings = get_settings()
 
-    # Historical bulk Sync may skip the model; still use heuristics, not "others".
+    # Heuristic-only path (fallback or tests). Live/Sync use OpenAI + guards.
     if not force_openai and not use_openai:
         return ClassificationResult(
-            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.UNKNOWN.value),  # type: ignore[arg-type]
             confidence=0.55 if heuristic else 0.35,
             response_id=None,
         )
     if not settings.openai_api_key:
         return ClassificationResult(
-            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.UNKNOWN.value),  # type: ignore[arg-type]
             confidence=0.45 if heuristic else None,
             response_id=None,
         )
@@ -381,15 +401,23 @@ async def classify_email(
     user_content = (
         f"From: {sender}\nSubject: {subject}\nSnippet: {snippet}\n\nBody:\n{body_text[:6000]}"
     )
-    response = await client.chat.completions.create(
-        model=settings.openai_model,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_model,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": get_active_system_prompt()},
+                {"role": "user", "content": user_content},
+            ],
+        )
+    except Exception:
+        logger.exception("OpenAI classification failed; using heuristic")
+        return ClassificationResult(
+            label=(heuristic or EmailLabel.UNKNOWN.value),  # type: ignore[arg-type]
+            confidence=0.45 if heuristic else None,
+            response_id=None,
+        )
     content = response.choices[0].message.content or "{}"
     label, confidence = _parse_label(content)
     label = apply_label_guards(

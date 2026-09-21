@@ -185,6 +185,51 @@ async def gmail_get_messages(
     return [row for row in fetched if row]
 
 
+GMAIL_COMBINED_QUERY = "in:inbox OR in:spam OR in:trash OR (-in:inbox -in:spam -in:trash -in:sent -in:drafts)"
+GMAIL_FOLDER_QUERIES: tuple[tuple[str, str], ...] = (
+    ("archive", "-in:inbox -in:spam -in:trash -in:sent -in:drafts"),
+    ("inbox", "in:inbox"),
+    ("spam", "in:spam"),
+    ("trash", "in:trash"),
+)
+
+
+async def _gmail_list_ids_for_query(
+    client: httpx.AsyncClient,
+    access_token: str,
+    query: str,
+    max_results: int,
+) -> tuple[list[str], int]:
+    ids: list[str] = []
+    page_token: str | None = None
+    remaining = max(1, max_results)
+    estimate = 0
+    while remaining > 0:
+        page_size = min(500, remaining)
+        params: dict = {"maxResults": page_size, "q": query}
+        if page_token:
+            params["pageToken"] = page_token
+        resp = await client.get(
+            f"{GMAIL_API}/users/me/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params=params,
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail=f"Gmail list messages failed: {resp.text}")
+        data = resp.json()
+        if not estimate:
+            estimate = int(data.get("resultSizeEstimate") or 0)
+        batch = [m["id"] for m in (data.get("messages") or [])]
+        if not batch:
+            break
+        ids.extend(batch)
+        remaining = max_results - len(ids)
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return ids[:max_results], max(estimate, len(ids[:max_results]))
+
+
 async def gmail_list_recent_message_ids(access_token: str, max_results: int = 10000) -> list[str]:
     ids, _estimate = await gmail_list_inbox_message_ids(access_token, max_results=max_results)
     return ids
@@ -193,36 +238,20 @@ async def gmail_list_recent_message_ids(access_token: str, max_results: int = 10
 async def gmail_list_inbox_message_ids(
     access_token: str, max_results: int = 10000
 ) -> tuple[list[str], int]:
-    """Page through Inbox until max_results ids are collected (Gmail max 500 per page)."""
-    ids: list[str] = []
-    page_token: str | None = None
-    remaining = max(1, max_results)
-    estimate = 0
+    """Page through Inbox, Spam, Trash, and Archive until max_results ids (Gmail max 500 per page)."""
     async with httpx.AsyncClient(timeout=60) as client:
-        while remaining > 0:
-            page_size = min(500, remaining)
-            params: dict = {"maxResults": page_size, "q": "in:inbox"}
-            if page_token:
-                params["pageToken"] = page_token
-            resp = await client.get(
-                f"{GMAIL_API}/users/me/messages",
-                headers={"Authorization": f"Bearer {access_token}"},
-                params=params,
-            )
-            if resp.status_code >= 400:
-                raise HTTPException(status_code=400, detail=f"Gmail list messages failed: {resp.text}")
-            data = resp.json()
-            if not estimate:
-                estimate = int(data.get("resultSizeEstimate") or 0)
-            batch = [m["id"] for m in (data.get("messages") or [])]
-            if not batch:
-                break
-            ids.extend(batch)
-            remaining = max_results - len(ids)
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
-    return ids[:max_results], max(estimate, len(ids[:max_results]))
+        return await _gmail_list_ids_for_query(client, access_token, GMAIL_COMBINED_QUERY, max_results)
+
+
+async def gmail_list_folder_id_map(access_token: str, max_results: int = 10000) -> dict[str, str]:
+    """Map message ids to inbox/spam/trash/archive. Later folders overwrite (trash wins)."""
+    mapping: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=60) as client:
+        for folder, query in GMAIL_FOLDER_QUERIES:
+            ids, _estimate = await _gmail_list_ids_for_query(client, access_token, query, max_results)
+            for mid in ids:
+                mapping[mid] = folder
+    return mapping
 
 
 def normalize_gmail_message(raw: dict) -> dict:
@@ -269,6 +298,8 @@ def normalize_gmail_message(raw: dict) -> dict:
         body_text = "".join(out).strip()
 
     snippet = (raw.get("snippet") or body_text[:280]).strip()
+    from app.email.folders import folder_from_gmail_labels
+
     return {
         "provider_message_id": raw["id"],
         "thread_id": raw.get("threadId"),
@@ -278,6 +309,7 @@ def normalize_gmail_message(raw: dict) -> dict:
         "snippet": snippet,
         "body_text": body_text[:20000],
         "body_html": body_html[:200000],
+        "folder": folder_from_gmail_labels(raw.get("labelIds")),
     }
 
 

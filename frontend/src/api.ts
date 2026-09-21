@@ -1,11 +1,15 @@
 export type EmailLabel =
-  | "available"
+  | "job_alert"
+  | "applied"
+  | "screening"
   | "interview"
   | "assessment"
+  | "offer"
   | "rejected"
-  | "applied"
-  | "alert"
-  | "others";
+  | "others"
+  | "unknown";
+
+export type MailFolder = "inbox" | "spam" | "trash" | "archive";
 
 export type Provider = "google" | "microsoft";
 
@@ -29,6 +33,8 @@ export interface EmailItem {
   label: EmailLabel;
   confidence: number | null;
   is_read: boolean;
+  human_corrected?: boolean;
+  folder?: MailFolder;
   created_at: string | null;
 }
 
@@ -89,10 +95,12 @@ export interface EmailPage {
   label_counts: Record<string, number>;
   mailbox_counts: Record<string, number>;
   mailbox_unread_counts: Record<string, number>;
+  folder_counts?: Record<string, number>;
 }
 
 export async function fetchEmails(opts?: {
   label?: string;
+  folder?: string;
   mailboxId?: number | null;
   limit?: number;
   beforeId?: number | null;
@@ -100,6 +108,7 @@ export async function fetchEmails(opts?: {
 }): Promise<EmailPage> {
   const params = new URLSearchParams();
   if (opts?.label && opts.label !== "all") params.set("label", opts.label);
+  if (opts?.folder && opts.folder !== "all") params.set("folder", opts.folder);
   if (opts?.mailboxId != null) params.set("mailbox_id", String(opts.mailboxId));
   params.set("limit", String(opts?.limit ?? 50));
   if (opts?.beforeId != null) params.set("before_id", String(opts.beforeId));
@@ -113,6 +122,93 @@ export async function fetchEmails(opts?: {
 export async function fetchEmailDetail(id: number): Promise<EmailDetail> {
   const res = await apiFetch(`${API_BASE}/api/emails/${id}`, undefined, 4);
   if (!res.ok) throw new Error(await readApiError(res, "Failed to load email"));
+  return res.json();
+}
+
+export async function updateEmailLabel(
+  id: number,
+  label: EmailLabel,
+  saveTraining: boolean
+): Promise<EmailDetail> {
+  const res = await apiFetch(`${API_BASE}/api/emails/${id}/label`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label, save_training: saveTraining }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to update category"));
+  return res.json();
+}
+
+export interface ClassifyPromptStatus {
+  unused_count: number;
+  active_version_id: number | null;
+  active_source: string | null;
+  example_count: number;
+  updated_at: string | null;
+}
+
+export interface ClassifyPromptUpdateResult {
+  ok: boolean;
+  example_count: number;
+  prompt_version_id: number | null;
+  message: string;
+}
+
+export async function fetchClassifyPromptStatus(): Promise<ClassifyPromptStatus> {
+  const res = await apiFetch(`${API_BASE}/api/classify/prompt`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load prompt status"));
+  return res.json();
+}
+
+export async function updateClassifyPrompt(): Promise<ClassifyPromptUpdateResult> {
+  const res = await apiFetch(`${API_BASE}/api/classify/prompt/update`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to update classify prompt"));
+  return res.json();
+}
+
+export interface ClassifyTrainingExample {
+  id: number;
+  email_id: number;
+  previous_label: string;
+  corrected_label: string;
+  subject: string;
+  sender: string;
+  snippet: string;
+  used_in_prompt_version_id: number | null;
+  created_at: string | null;
+}
+
+export interface ClassifyTrainingPage {
+  items: ClassifyTrainingExample[];
+  unused_count: number;
+  total: number;
+}
+
+export async function fetchClassifyTraining(): Promise<ClassifyTrainingPage> {
+  const res = await apiFetch(`${API_BASE}/api/classify/training`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load training data"));
+  return res.json();
+}
+
+export interface MailboxLabelStats {
+  mailbox_id: number;
+  date_from: string;
+  date_to: string;
+  total: number;
+  label_counts: Record<string, number>;
+}
+
+export async function fetchMailboxLabelStats(
+  mailboxId: number,
+  dateFrom: string,
+  dateTo: string
+): Promise<MailboxLabelStats> {
+  const params = new URLSearchParams({
+    date_from: dateFrom,
+    date_to: dateTo,
+  });
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${mailboxId}/label-stats?${params}`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load category statistics"));
   return res.json();
 }
 
@@ -138,9 +234,21 @@ export async function syncMailbox(id: number): Promise<SyncStartResult> {
   return res.json();
 }
 
-export async function reclassifyMailbox(id: number): Promise<{ updated: number; total: number }> {
+export async function reclassifyMailbox(id: number): Promise<SyncStartResult> {
   const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/reclassify`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to reclassify mailbox");
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to reclassify mailbox"));
+  return res.json();
+}
+
+export async function stopSyncMailbox(id: number): Promise<SyncStartResult> {
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/sync/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to stop sync"));
+  return res.json();
+}
+
+export async function stopReclassifyMailbox(id: number): Promise<SyncStartResult> {
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/reclassify/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to stop reclassify"));
   return res.json();
 }
 

@@ -28,13 +28,15 @@ UtcDateTime = Annotated[
 ]
 
 EmailLabelLiteral = Literal[
-    "available",
+    "job_alert",
+    "applied",
+    "screening",
     "interview",
     "assessment",
+    "offer",
     "rejected",
-    "applied",
-    "alert",
     "others",
+    "unknown",
 ]
 ProviderLiteral = Literal["google", "microsoft"]
 
@@ -63,6 +65,8 @@ class EmailOut(BaseModel):
     label: str
     confidence: float | None = None
     is_read: bool = False
+    human_corrected: bool = False
+    folder: str = "inbox"
     created_at: UtcDateTime | None = None
 
 
@@ -75,6 +79,7 @@ class EmailPageOut(BaseModel):
     label_counts: dict[str, int]
     mailbox_counts: dict[str, int]
     mailbox_unread_counts: dict[str, int] = {}
+    folder_counts: dict[str, int] = {}
 
 
 class EmailDetailOut(EmailOut):
@@ -103,3 +108,51 @@ class ClassificationResult(BaseModel):
     label: EmailLabelLiteral
     confidence: float | None = None
     response_id: str | None = None
+
+
+class EmailLabelUpdateIn(BaseModel):
+    label: EmailLabelLiteral
+    save_training: bool = True
+
+
+class ClassifyPromptStatusOut(BaseModel):
+    unused_count: int = 0
+    active_version_id: int | None = None
+    active_source: str | None = None
+    example_count: int = 0
+    updated_at: UtcDateTime | None = None
+
+
+class ClassifyPromptUpdateOut(BaseModel):
+    ok: bool
+    example_count: int = 0
+    prompt_version_id: int | None = None
+    message: str = ""
+
+
+class ClassifyTrainingExampleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email_id: int
+    previous_label: str
+    corrected_label: str
+    subject: str
+    sender: str
+    snippet: str
+    used_in_prompt_version_id: int | None = None
+    created_at: UtcDateTime | None = None
+
+
+class ClassifyTrainingPageOut(BaseModel):
+    items: list[ClassifyTrainingExampleOut]
+    unused_count: int = 0
+    total: int = 0
+
+
+class MailboxLabelStatsOut(BaseModel):
+    mailbox_id: int
+    date_from: str
+    date_to: str
+    total: int = 0
+    label_counts: dict[str, int]

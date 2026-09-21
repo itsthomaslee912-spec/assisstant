@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, emails, events, health, mailboxes, webhooks
+from app.api import auth, classify, emails, events, health, mailboxes, webhooks
 from app.config import get_settings
 from app.db import init_db
 from app.realtime.renewal import renewal_loop
@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(mailboxes.router)
     app.include_router(emails.router)
+    app.include_router(classify.router)
     app.include_router(events.router)
     app.include_router(webhooks.router)
     return app

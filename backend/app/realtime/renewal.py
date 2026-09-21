@@ -11,7 +11,12 @@ from app.auth.oauth_microsoft import ensure_microsoft_access_token
 from app.db import SessionLocal
 from app.models import MailboxConnection, Provider, WebhookSubscription
 from app.realtime.gmail_watch import start_gmail_watch
-from app.realtime.outlook_subscriptions import renew_outlook_subscription
+from app.realtime.outlook_subscriptions import (
+    OUTLOOK_LIVE_FOLDERS,
+    create_outlook_subscription,
+    parse_outlook_subscription_ids,
+    renew_outlook_subscriptions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +41,14 @@ async def renew_expiring_subscriptions() -> None:
                     await start_gmail_watch(db, mailbox, token)
                 elif mailbox.provider == Provider.MICROSOFT.value and webhook.external_id:
                     token = await ensure_microsoft_access_token(db, mailbox)
-                    data = await renew_outlook_subscription(token, webhook.external_id)
-                    exp = data.get("expirationDateTime")
-                    if exp:
-                        webhook.expires_at = datetime.fromisoformat(exp.replace("Z", "+00:00"))
-                        db.commit()
+                    ids = parse_outlook_subscription_ids(webhook.external_id)
+                    if len(ids) < len(OUTLOOK_LIVE_FOLDERS):
+                        await create_outlook_subscription(db, mailbox, token)
+                    else:
+                        expires_at = await renew_outlook_subscriptions(token, ids)
+                        if expires_at:
+                            webhook.expires_at = expires_at
+                            db.commit()
             except Exception:
                 logger.exception("Failed renewing webhook for mailbox %s", mailbox.id)
     finally:

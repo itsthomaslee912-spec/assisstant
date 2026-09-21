@@ -15,13 +15,22 @@ class Provider(str, Enum):
 
 
 class EmailLabel(str, Enum):
-    AVAILABLE = "available"
+    JOB_ALERT = "job_alert"
+    APPLIED = "applied"
+    SCREENING = "screening"
     INTERVIEW = "interview"
     ASSESSMENT = "assessment"
+    OFFER = "offer"
     REJECTED = "rejected"
-    APPLIED = "applied"
-    ALERT = "alert"
     OTHERS = "others"
+    UNKNOWN = "unknown"
+
+
+class MailFolder(str, Enum):
+    INBOX = "inbox"
+    SPAM = "spam"
+    TRASH = "trash"
+    ARCHIVE = "archive"
 
 
 class User(Base):
@@ -56,9 +65,16 @@ class MailboxConnection(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="mailboxes")
-    emails: Mapped[list[EmailMessage]] = relationship(back_populates="mailbox")
+    emails: Mapped[list[EmailMessage]] = relationship(
+        back_populates="mailbox",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     webhook: Mapped[WebhookSubscription | None] = relationship(
-        back_populates="mailbox", uselist=False
+        back_populates="mailbox",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -67,7 +83,9 @@ class EmailMessage(Base):
     __table_args__ = (UniqueConstraint("mailbox_id", "provider_message_id", name="uq_mailbox_msg"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    mailbox_id: Mapped[int] = mapped_column(ForeignKey("mailbox_connections.id"), index=True)
+    mailbox_id: Mapped[int] = mapped_column(
+        ForeignKey("mailbox_connections.id", ondelete="CASCADE"), index=True
+    )
     provider_message_id: Mapped[str] = mapped_column(String(255), index=True)
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject: Mapped[str] = mapped_column(String(998), default="")
@@ -77,19 +95,61 @@ class EmailMessage(Base):
     body_text: Mapped[str] = mapped_column(Text, default="")
     body_html: Mapped[str] = mapped_column(Text, default="")
     label: Mapped[str] = mapped_column(String(32), index=True, default=EmailLabel.OTHERS.value)
+    folder: Mapped[str] = mapped_column(String(16), index=True, default=MailFolder.INBOX.value)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     openai_response_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_read: Mapped[bool] = mapped_column(default=False)
+    human_corrected: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     mailbox: Mapped[MailboxConnection] = relationship(back_populates="emails")
+    corrections: Mapped[list[ClassifyCorrection]] = relationship(
+        back_populates="email",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ClassifyCorrection(Base):
+    __tablename__ = "classify_corrections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email_id: Mapped[int] = mapped_column(
+        ForeignKey("email_messages.id", ondelete="CASCADE"), index=True
+    )
+    previous_label: Mapped[str] = mapped_column(String(32))
+    corrected_label: Mapped[str] = mapped_column(String(32), index=True)
+    subject: Mapped[str] = mapped_column(String(998), default="")
+    sender: Mapped[str] = mapped_column(String(512), default="")
+    snippet: Mapped[str] = mapped_column(Text, default="")
+    body_text: Mapped[str] = mapped_column(Text, default="")
+    used_in_prompt_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("classify_prompt_versions.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    email: Mapped[EmailMessage] = relationship(back_populates="corrections")
+
+
+class ClassifyPromptVersion(Base):
+    __tablename__ = "classify_prompt_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prompt_text: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="seed")
+    openai_response_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    example_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class WebhookSubscription(Base):
     __tablename__ = "webhook_subscriptions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    mailbox_id: Mapped[int] = mapped_column(ForeignKey("mailbox_connections.id"), unique=True)
+    mailbox_id: Mapped[int] = mapped_column(
+        ForeignKey("mailbox_connections.id", ondelete="CASCADE"), unique=True
+    )
     provider: Mapped[str] = mapped_column(String(32), index=True)
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     resource: Mapped[str | None] = mapped_column(String(512), nullable=True)

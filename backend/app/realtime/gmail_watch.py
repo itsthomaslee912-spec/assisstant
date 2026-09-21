@@ -26,7 +26,8 @@ async def start_gmail_watch(db: Session, mailbox: MailboxConnection, access_toke
             headers={"Authorization": f"Bearer {access_token}"},
             json={
                 "topicName": settings.gmail_pubsub_topic,
-                "labelIds": ["INBOX"],
+                "labelIds": ["SENT", "DRAFT"],
+                "labelFilterAction": "exclude",
             },
         )
         if resp.status_code >= 400:

@@ -49,7 +49,7 @@ async def outlook_get_message(access_token: str, message_id: str) -> dict:
             f"{GRAPH}/me/messages/{message_id}",
             headers={"Authorization": f"Bearer {access_token}"},
             params={
-                "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId",
+                "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId,parentFolderId",
             },
         )
         if resp.status_code >= 400:
@@ -58,33 +58,70 @@ async def outlook_get_message(access_token: str, message_id: str) -> dict:
 
 
 async def outlook_list_recent(access_token: str, top: int = 500) -> list[dict]:
-    messages: list[dict] = []
-    url = f"{GRAPH}/me/mailFolders/inbox/messages"
-    params = {
-        "$top": min(50, max(1, top)),
-        "$orderby": "receivedDateTime desc",
-        "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId",
-    }
+    """List Inbox, Junk Email, Deleted Items, and Archive, then keep the newest `top` overall."""
+    folders = ("inbox", "junkemail", "deleteditems", "archive")
+    collected: dict[str, dict] = {}
+    per_folder = max(1, top)
+    select = "id,subject,from,receivedDateTime,bodyPreview,body,conversationId"
     async with httpx.AsyncClient(timeout=60) as client:
-        while len(messages) < top:
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                params=params if url.endswith("/messages") else None,
-            )
-            if resp.status_code >= 400:
-                raise HTTPException(status_code=400, detail=f"Outlook list messages failed: {resp.text}")
+        for folder in folders:
+            messages: list[dict] = []
+            url = f"{GRAPH}/me/mailFolders/{folder}/messages"
+            params: dict | None = {
+                "$top": min(50, per_folder),
+                "$orderby": "receivedDateTime desc",
+                "$select": select,
+            }
+            while len(messages) < per_folder:
+                resp = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params=params if url.endswith("/messages") else None,
+                )
+                if resp.status_code >= 400:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Outlook list messages failed ({folder}): {resp.text}",
+                    )
+                data = resp.json()
+                batch = data.get("value") or []
+                if not batch:
+                    break
+                messages.extend(batch)
+                next_link = data.get("@odata.nextLink")
+                if not next_link:
+                    break
+                url = next_link
+                params = None
+            for raw in messages[:per_folder]:
+                mid = raw.get("id")
+                if mid:
+                    raw["_mail_folder"] = folder
+                    collected[mid] = raw
+
+    def received_key(raw: dict) -> str:
+        return str(raw.get("receivedDateTime") or "")
+
+    ordered = sorted(collected.values(), key=received_key, reverse=True)
+    return ordered[:top]
+
+
+async def outlook_attach_folder(access_token: str, raw: dict) -> dict:
+    if raw.get("_mail_folder"):
+        return raw
+    parent = raw.get("parentFolderId")
+    if not parent:
+        return raw
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{GRAPH}/me/mailFolders/{parent}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"$select": "wellKnownName,displayName"},
+        )
+        if resp.status_code < 400:
             data = resp.json()
-            batch = data.get("value") or []
-            if not batch:
-                break
-            messages.extend(batch)
-            next_link = data.get("@odata.nextLink")
-            if not next_link:
-                break
-            url = next_link
-            params = None
-    return messages[:top]
+            raw["_mail_folder"] = data.get("wellKnownName") or data.get("displayName") or "inbox"
+    return raw
 
 
 def normalize_outlook_message(raw: dict) -> dict:
@@ -110,6 +147,13 @@ def normalize_outlook_message(raw: dict) -> dict:
         body_text = content
 
     snippet = (raw.get("bodyPreview") or body_text[:280]).strip()
+    from app.email.folders import folder_from_outlook_well_known, normalize_folder
+
+    folder = "inbox"
+    if raw.get("_mail_folder"):
+        folder = folder_from_outlook_well_known(str(raw["_mail_folder"]))
+    elif raw.get("folder"):
+        folder = normalize_folder(str(raw.get("folder")))
     return {
         "provider_message_id": raw["id"],
         "thread_id": raw.get("conversationId"),
@@ -119,6 +163,7 @@ def normalize_outlook_message(raw: dict) -> dict:
         "snippet": snippet,
         "body_text": body_text[:20000],
         "body_html": body_html[:200000],
+        "folder": folder,
     }
 
 

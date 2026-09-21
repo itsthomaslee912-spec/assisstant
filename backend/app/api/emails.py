@@ -10,28 +10,54 @@ from app.auth.oauth_google import ensure_google_access_token
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
 from app.db import get_db
 from app.email.gmail import gmail_get_message, gmail_send_message, split_mixed_plain_html
-from app.email.outlook import outlook_get_message, outlook_send_message
-from app.models import EmailLabel, EmailMessage, MailboxConnection, Provider
-from app.schemas import EmailDetailOut, EmailOut, EmailPageOut, SendEmailIn, SendEmailOut
+from app.email.outlook import outlook_attach_folder, outlook_get_message, outlook_send_message
+from app.email.folders import VALID_FOLDERS
+from app.models import ClassifyCorrection, EmailLabel, EmailMessage, MailboxConnection, MailFolder, Provider
+from app.realtime.sse import publish
+from app.schemas import (
+    EmailDetailOut,
+    EmailLabelUpdateIn,
+    EmailOut,
+    EmailPageOut,
+    SendEmailIn,
+    SendEmailOut,
+)
 
 router = APIRouter(prefix="/api/emails", tags=["emails"])
+
+
+def _from_active_mailbox(query):
+    return query.join(
+        MailboxConnection, MailboxConnection.id == EmailMessage.mailbox_id
+    ).filter(MailboxConnection.is_active.is_(True))
+
+
+def _email_from_active_mailbox(db: Session, email_id: int) -> EmailMessage | None:
+    return (
+        _from_active_mailbox(db.query(EmailMessage))
+        .filter(EmailMessage.id == email_id)
+        .one_or_none()
+    )
 
 
 @router.get("", response_model=EmailPageOut)
 def list_emails(
     label: str | None = Query(default=None),
     mailbox_id: int | None = Query(default=None),
+    folder: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     before_id: int | None = Query(default=None),
     before_received_at: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> EmailPageOut:
     valid = {item.value for item in EmailLabel}
-    filtered = db.query(EmailMessage)
+    filtered = _from_active_mailbox(db.query(EmailMessage))
     if mailbox_id is not None:
         filtered = filtered.filter(EmailMessage.mailbox_id == mailbox_id)
     if label and label != "all" and label in valid:
         filtered = filtered.filter(EmailMessage.label == label)
+    if folder and folder != "all" and folder in VALID_FOLDERS:
+        filtered = filtered.filter(EmailMessage.folder == folder)
 
     total = filtered.count()
     page_q = filtered.order_by(EmailMessage.received_at.desc(), EmailMessage.id.desc())
@@ -58,27 +84,37 @@ def list_emails(
     rows = rows[:limit]
     for row in rows:
         if row.label not in valid:
-            row.label = EmailLabel.OTHERS.value
+            row.label = EmailLabel.UNKNOWN.value
+        if row.folder not in VALID_FOLDERS:
+            row.folder = MailFolder.INBOX.value
 
-    label_q = db.query(EmailMessage.label, func.count(EmailMessage.id))
+    label_q = _from_active_mailbox(db.query(EmailMessage.label, func.count(EmailMessage.id)))
     if mailbox_id is not None:
         label_q = label_q.filter(EmailMessage.mailbox_id == mailbox_id)
     label_counts = {item: 0 for item in valid}
     for lab, count in label_q.group_by(EmailMessage.label):
-        key = lab if lab in valid else EmailLabel.OTHERS.value
+        key = lab if lab in valid else EmailLabel.UNKNOWN.value
         label_counts[key] = label_counts.get(key, 0) + int(count)
 
+    folder_q = _from_active_mailbox(db.query(EmailMessage.folder, func.count(EmailMessage.id)))
+    if mailbox_id is not None:
+        folder_q = folder_q.filter(EmailMessage.mailbox_id == mailbox_id)
+    folder_counts = {item: 0 for item in VALID_FOLDERS}
+    for fold, count in folder_q.group_by(EmailMessage.folder):
+        key = fold if fold in VALID_FOLDERS else MailFolder.INBOX.value
+        folder_counts[key] = folder_counts.get(key, 0) + int(count)
+
+    mailbox_count_q = _from_active_mailbox(
+        db.query(EmailMessage.mailbox_id, func.count(EmailMessage.id))
+    )
     mailbox_counts = {
-        str(mid): int(count)
-        for mid, count in db.query(EmailMessage.mailbox_id, func.count(EmailMessage.id)).group_by(
-            EmailMessage.mailbox_id
-        )
+        str(mid): int(count) for mid, count in mailbox_count_q.group_by(EmailMessage.mailbox_id)
     }
+    mailbox_unread_q = _from_active_mailbox(
+        db.query(EmailMessage.mailbox_id, func.count(EmailMessage.id))
+    ).filter(EmailMessage.is_read.is_not(True))
     mailbox_unread_counts = {
-        str(mid): int(count)
-        for mid, count in db.query(EmailMessage.mailbox_id, func.count(EmailMessage.id))
-        .filter(EmailMessage.is_read.is_not(True))
-        .group_by(EmailMessage.mailbox_id)
+        str(mid): int(count) for mid, count in mailbox_unread_q.group_by(EmailMessage.mailbox_id)
     }
 
     return EmailPageOut(
@@ -90,12 +126,13 @@ def list_emails(
         label_counts=label_counts,
         mailbox_counts=mailbox_counts,
         mailbox_unread_counts=mailbox_unread_counts,
+        folder_counts=folder_counts,
     )
 
 
 @router.get("/{email_id}", response_model=EmailDetailOut)
 async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailMessage:
-    email = db.query(EmailMessage).filter(EmailMessage.id == email_id).one_or_none()
+    email = _email_from_active_mailbox(db, email_id)
     if email is None:
         raise HTTPException(status_code=404, detail="Email not found")
 
@@ -128,9 +165,12 @@ async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailMessag
                     email.body_html = normalized.get("body_html") or email.body_html or ""
                     if normalized.get("snippet"):
                         email.snippet = normalized["snippet"][:1000]
+                    if normalized.get("folder"):
+                        email.folder = normalized["folder"]
                 elif mailbox.provider == Provider.MICROSOFT.value:
                     token = await ensure_microsoft_access_token(db, mailbox)
                     raw = await outlook_get_message(token, email.provider_message_id)
+                    raw = await outlook_attach_folder(token, raw)
                     from app.email.outlook import normalize_outlook_message
 
                     normalized = normalize_outlook_message(raw)
@@ -138,13 +178,59 @@ async def get_email(email_id: int, db: Session = Depends(get_db)) -> EmailMessag
                     email.body_html = normalized.get("body_html") or email.body_html or ""
                     if normalized.get("snippet"):
                         email.snippet = normalized["snippet"][:1000]
+                    if normalized.get("folder"):
+                        email.folder = normalized["folder"]
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"Could not load email body: {exc}") from exc
 
     if not email.is_read:
         email.is_read = True
+    if email.label not in {item.value for item in EmailLabel}:
+        email.label = EmailLabel.UNKNOWN.value
     db.commit()
     db.refresh(email)
+    return email
+
+
+TRAINING_BODY_CAP = 4000
+
+
+@router.patch("/{email_id}/label", response_model=EmailDetailOut)
+async def update_email_label(
+    email_id: int,
+    payload: EmailLabelUpdateIn,
+    db: Session = Depends(get_db),
+) -> EmailMessage:
+    email = _email_from_active_mailbox(db, email_id)
+    if email is None:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    previous_label = email.label
+    new_label = payload.label
+    if previous_label != new_label:
+        if payload.save_training:
+            body = (email.body_text or email.snippet or "")[:TRAINING_BODY_CAP]
+            db.add(
+                ClassifyCorrection(
+                    email_id=email.id,
+                    previous_label=previous_label,
+                    corrected_label=new_label,
+                    subject=email.subject or "",
+                    sender=email.sender or "",
+                    snippet=email.snippet or "",
+                    body_text=body,
+                )
+            )
+        email.label = new_label
+
+    email.human_corrected = True
+    db.commit()
+    db.refresh(email)
+
+    payload_out = EmailOut.model_validate(email).model_dump()
+    payload_out["previous_label"] = previous_label
+    payload_out["updated"] = previous_label != new_label
+    await publish("email.classified", payload_out)
     return email
 
 
