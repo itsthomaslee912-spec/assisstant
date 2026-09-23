@@ -225,7 +225,12 @@ def list_emails(
     }
     mailbox_unread_q = _from_active_mailbox(
         db.query(EmailMessage.mailbox_id, func.count(EmailMessage.id))
-    ).filter(EmailMessage.is_read.is_not(True))
+    ).filter(
+        EmailMessage.is_read.is_not(True),
+        # Sidebar badges represent new messages that are still in each inbox.
+        # Do not count unread copies in Sent, Spam, Trash, or Archive.
+        EmailMessage.folder == MailFolder.INBOX.value,
+    )
     mailbox_unread_counts = {
         str(mid): int(count) for mid, count in mailbox_unread_q.group_by(EmailMessage.mailbox_id)
     }

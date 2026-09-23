@@ -91,6 +91,7 @@ def test_list_emails_filters_folder():
     )
     db.add(mailbox)
     db.flush()
+    mailbox_id = mailbox.id
     db.add_all(
         [
             EmailMessage(
@@ -120,6 +121,15 @@ def test_list_emails_filters_folder():
                 label=EmailLabel.OTHER.value,
                 folder=MailFolder.TRASH.value,
             ),
+            EmailMessage(
+                mailbox_id=mailbox.id,
+                provider_message_id="sent1",
+                subject="Sent",
+                sender="a@b.com",
+                snippet="hi",
+                label=EmailLabel.OTHER.value,
+                folder=MailFolder.SENT.value,
+            ),
         ]
     )
     db.commit()
@@ -146,7 +156,10 @@ def test_list_emails_filters_folder():
     assert body["folder_counts"]["inbox"] == 1
     assert body["folder_counts"]["spam"] == 1
     assert body["folder_counts"]["trash"] == 1
+    # Sidebar unread badges include only unread messages currently in Inbox.
+    assert body["mailbox_unread_counts"] == {str(mailbox_id): 1}
 
     mixed = client.get("/api/emails")
     assert mixed.status_code == 200
-    assert mixed.json()["total"] == 3
+    assert mixed.json()["total"] == 4
+    assert mixed.json()["mailbox_unread_counts"] == {str(mailbox_id): 1}
