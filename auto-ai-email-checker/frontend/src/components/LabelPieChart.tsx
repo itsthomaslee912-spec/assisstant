@@ -1,16 +1,9 @@
-import type { EmailLabel, OutcomeLabel } from "../api";
 import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES, LABEL_BAR_COLORS } from "../labels";
-
-const OUTCOME_LABELS = new Set<EmailLabel>(["applied", "rejected", "screening", "interview"]);
 
 export default function LabelPieChart({
   counts,
-  active,
-  onSelect,
 }: {
   counts: Record<string, number>;
-  active: OutcomeLabel;
-  onSelect: (label: OutcomeLabel) => void;
 }) {
   const slices = CLASSIFY_LABELS.map((key) => ({
     key,
@@ -19,6 +12,8 @@ export default function LabelPieChart({
     title: CLASSIFY_LABEL_TITLES[key],
   }));
   const total = slices.reduce((sum, slice) => sum + slice.value, 0);
+  const activeCount = slices.filter((slice) => slice.value > 0).length;
+  const leading = [...slices].sort((a, b) => b.value - a.value)[0];
   let cursor = 0;
   const gradient =
     total === 0
@@ -34,37 +29,51 @@ export default function LabelPieChart({
 
   return (
     <div className="stats-pie-block stats-card">
-      <h4>All categories</h4>
+      <div className="stats-card-head">
+        <div>
+          <span className="stats-eyebrow">Overview</span>
+          <h4>Category distribution</h4>
+        </div>
+        <span className="stats-total-badge">{activeCount} active</span>
+      </div>
+
       <div className="stats-pie-row">
-        <div className="stats-donut" style={{ background: gradient }} role="img" aria-label="All category counts">
+        <div
+          className="stats-donut"
+          style={{ background: gradient }}
+          role="img"
+          aria-label="All category counts"
+        >
           <div className="stats-donut-hole">
-            <strong>{total}</strong>
-            <span>total</span>
+            <strong>{total.toLocaleString()}</strong>
+            <span>emails</span>
           </div>
         </div>
-        <ul className="stats-pie-legend">
-          {slices.map((slice) => (
-            <li key={slice.key} className={slice.key === active ? "active" : undefined}>
-              {OUTCOME_LABELS.has(slice.key) ? (
-                <button
-                  type="button"
-                  className="stats-pie-pick"
-                  onClick={() => onSelect(slice.key as OutcomeLabel)}
-                >
-                  <span className="stats-pie-swatch" style={{ background: slice.color }} />
-                  <span>{slice.title}</span>
-                  <strong>{slice.value}</strong>
-                </button>
-              ) : (
+
+        <div className="stats-pie-details">
+          <div className="stats-highlight">
+            <span>Largest category</span>
+            <strong>{total > 0 ? leading.title : "No email data"}</strong>
+            <small>
+              {total > 0
+                ? `${leading.value.toLocaleString()} emails · ${Math.round((leading.value * 100) / total)}%`
+                : "Try a different date range"}
+            </small>
+          </div>
+
+          <ul className="stats-pie-legend">
+            {slices.map((slice) => (
+              <li key={slice.key} className={slice.value === 0 ? "is-empty" : undefined}>
                 <span className="stats-pie-pick">
                   <span className="stats-pie-swatch" style={{ background: slice.color }} />
                   <span>{slice.title}</span>
-                  <strong>{slice.value}</strong>
+                  <strong>{slice.value.toLocaleString()}</strong>
+                  <small>{total ? `${Math.round((slice.value * 100) / total)}%` : "0%"}</small>
                 </span>
-              )}
-            </li>
-          ))}
-        </ul>
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     </div>
   );

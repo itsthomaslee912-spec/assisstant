@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, classify, emails, events, health, mailboxes, webhooks
+from app.api import ai_settings, auth, classify, emails, events, health, mailboxes, webhooks
 from app.config import get_settings
 from app.db import init_db
 from app.realtime.renewal import renewal_loop
 from app.services.outcome_backfill import backfill_outcomes
+from app.services.auto_sync import auto_sync_loop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
     stop_event = asyncio.Event()
     task = asyncio.create_task(renewal_loop(stop_event))
     backfill_task = asyncio.create_task(backfill_outcomes(stop_event))
+    auto_sync_task = asyncio.create_task(auto_sync_loop(stop_event))
     logger.info("Auto AI Email Checker API started")
     try:
         yield
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI):
         stop_event.set()
         await task
         await backfill_task
+        await auto_sync_task
 
 
 def create_app() -> FastAPI:
@@ -43,6 +46,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(health.router)
+    app.include_router(ai_settings.router)
     app.include_router(auth.router)
     app.include_router(mailboxes.router)
     app.include_router(emails.router)

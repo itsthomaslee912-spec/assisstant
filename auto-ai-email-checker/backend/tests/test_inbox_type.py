@@ -72,7 +72,7 @@ def _seed(db) -> MailboxConnection:
                 sender="s@example.com",
                 snippet=mid,
                 body_text=mid,
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 is_read=is_read,
                 received_at=received_at,
             )

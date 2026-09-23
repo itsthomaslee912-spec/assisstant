@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
+import asyncio
 
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -59,7 +60,7 @@ def _seed_unread_email(db) -> EmailMessage:
         sender="sender@example.com",
         snippet="hello",
         body_text="Hello body",
-        label=EmailLabel.OTHERS.value,
+        label=EmailLabel.OTHER.value,
         is_read=False,
     )
     db.add(email)
@@ -82,6 +83,7 @@ def test_get_email_marks_provider_read_once():
     with (
         patch("app.api.emails.gmail_mark_read", mark_read),
         patch("app.api.emails.ensure_google_access_token", ensure_token),
+        patch("app.api.emails.SessionLocal", SessionLocal),
     ):
         first = client.get(f"/api/emails/{email_id}")
         assert first.status_code == 200
@@ -93,6 +95,23 @@ def test_get_email_marks_provider_read_once():
         assert second.status_code == 200
         assert second.json()["is_read"] is True
         mark_read.assert_not_awaited()
+
+
+def test_get_email_returns_before_provider_read():
+    SessionLocal = _session_factory()
+    with SessionLocal() as db:
+        email = _seed_unread_email(db)
+        email_id = email.id
+
+    tasks = BackgroundTasks()
+    mark_read = AsyncMock()
+    with patch("app.api.emails.gmail_mark_read", mark_read):
+        with SessionLocal() as db:
+            result = asyncio.run(emails.get_email(email_id, tasks, db))
+            assert result.is_read is True
+            assert result.body_text == "Hello body"
+        mark_read.assert_not_awaited()
+        assert len(tasks.tasks) == 1
 
 
 def _seed_mailbox(db, *, external_id: str, email_address: str) -> MailboxConnection:
@@ -122,7 +141,7 @@ def _add_email(db, mailbox: MailboxConnection, provider_message_id: str, *, is_r
         sender="sender@example.com",
         snippet="hello",
         body_text="Hello body",
-        label=EmailLabel.OTHERS.value,
+        label=EmailLabel.OTHER.value,
         is_read=is_read,
     )
     db.add(email)
@@ -233,6 +252,7 @@ def test_get_email_still_marks_local_read_when_provider_fails():
     with (
         patch("app.api.emails.gmail_mark_read", mark_read),
         patch("app.api.emails.ensure_google_access_token", ensure_token),
+        patch("app.api.emails.SessionLocal", SessionLocal),
     ):
         res = client.get(f"/api/emails/{email_id}")
         assert res.status_code == 200

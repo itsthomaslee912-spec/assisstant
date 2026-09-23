@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -13,10 +14,13 @@ from app.services.mailbox_sync import process_gmail_notification, process_outloo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
+_gmail_pending: dict[str, str | None] = {}
+_gmail_tasks: dict[str, asyncio.Task[None]] = {}
+_MISSING = object()
 
 
 @router.post("/gmail")
-async def gmail_pubsub_push(request: Request, background_tasks: BackgroundTasks) -> dict:
+async def gmail_pubsub_push(request: Request) -> dict:
     body = await request.json()
     message = body.get("message") or {}
     data_b64 = message.get("data")
@@ -32,8 +36,31 @@ async def gmail_pubsub_push(request: Request, background_tasks: BackgroundTasks)
 
     email_address = payload.get("emailAddress") or ""
     history_id = str(payload.get("historyId") or "") or None
-    background_tasks.add_task(_handle_gmail, email_address, history_id)
+    if not email_address:
+        return {"ok": True, "skipped": True}
+    _schedule_gmail(email_address, history_id)
     return {"ok": True}
+
+
+def _schedule_gmail(email_address: str, history_id: str | None) -> None:
+    """Coalesce Pub/Sub retries and acknowledge the HTTP request immediately."""
+    _gmail_pending[email_address] = history_id
+    task = _gmail_tasks.get(email_address)
+    if task is None or task.done():
+        _gmail_tasks[email_address] = asyncio.create_task(_drain_gmail(email_address))
+
+
+async def _drain_gmail(email_address: str) -> None:
+    try:
+        while True:
+            history_id = _gmail_pending.pop(email_address, _MISSING)
+            if history_id is _MISSING:
+                return
+            await _handle_gmail(email_address, history_id)
+    finally:
+        _gmail_tasks.pop(email_address, None)
+        if email_address in _gmail_pending:
+            _schedule_gmail(email_address, _gmail_pending[email_address])
 
 
 async def _handle_gmail(email_address: str, history_id: str | None) -> None:

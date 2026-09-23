@@ -5,7 +5,7 @@ Set-Location $Root
 
 if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
   Copy-Item ".env.example" ".env"
-  Write-Host "Created .env from .env.example — fill in your API keys before connecting mailboxes."
+  Write-Host "Created .env from .env.example. Fill in your API keys before connecting mailboxes."
 }
 
 Write-Host "Starting AI Auto-Email Checker..."
@@ -25,4 +25,38 @@ Start-Process powershell -ArgumentList @(
   "-File", (Join-Path $Root "scripts\run-frontend.ps1")
 )
 
-Write-Host "Both windows opened. Close those windows to stop the servers."
+$ngrok = Get-Command ngrok -ErrorAction SilentlyContinue
+if ($ngrok) {
+  $tunnelRunning = $false
+  try {
+    $null = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 2
+    $tunnelRunning = $true
+  } catch {
+    $tunnelRunning = $false
+  }
+
+  if (-not $tunnelRunning) {
+    $webhookBaseUrl = ""
+    Get-Content (Join-Path $Root ".env") | ForEach-Object {
+      if ($_ -match '^WEBHOOK_BASE_URL\s*=\s*(.+?)\s*$') {
+        $webhookBaseUrl = $Matches[1].Trim().Trim([char]34).Trim([char]39)
+      }
+    }
+    $ngrokArgs = @("http", "http://127.0.0.1:8000")
+    if ($webhookBaseUrl -match '^https://.+\.ngrok(?:-free)?\.(?:app|dev)$') {
+      $ngrokArgs += @("--url", $webhookBaseUrl)
+    }
+    Start-Process -FilePath $ngrok.Source -ArgumentList $ngrokArgs -WindowStyle Hidden
+    if ($webhookBaseUrl) {
+      Write-Host "  Webhook tunnel: $webhookBaseUrl"
+    } else {
+      Write-Host "  Webhook tunnel: ngrok assigned URL"
+    }
+  } else {
+    Write-Host "  Webhook tunnel: already running"
+  }
+} else {
+  Write-Warning "ngrok was not found. Webhook delivery requires ngrok or another public HTTPS tunnel."
+}
+
+Write-Host "Backend, frontend, and webhook tunnel started."

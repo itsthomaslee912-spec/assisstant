@@ -78,7 +78,7 @@ def test_label_stats_filters_by_date_and_mailbox():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
         received_at=datetime(2026, 8, 10, 12, 0, 0),
         provider_message_id="in-range-interview",
     )
@@ -92,14 +92,14 @@ def test_label_stats_filters_by_date_and_mailbox():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 1, 2, 9, 0, 0),
         provider_message_id="out-of-range",
     )
     _add_email(
         db,
         box_b.id,
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
         received_at=datetime(2026, 8, 12, 9, 0, 0),
         provider_message_id="other-mailbox",
     )
@@ -119,9 +119,9 @@ def test_label_stats_filters_by_date_and_mailbox():
     assert body["date_to"] == "2026-08-31"
     assert body["total"] == 2
     counts = body["label_counts"]
-    assert counts["interview"] == 1
+    assert counts["interview_scheduled"] == 1
     assert counts["offer"] == 1
-    assert counts["rejected"] == 0
+    assert counts["rejected_closed"] == 0
     for key in EmailLabel:
         assert key.value in counts
 
@@ -173,21 +173,21 @@ def test_label_stats_all_accounts_and_exact_datetime_bound():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
         received_at=datetime(2026, 8, 10, 15, 0, 0),
         provider_message_id="a-1500",
     )
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
         received_at=datetime(2026, 8, 10, 16, 0, 0),
         provider_message_id="a-1600",
     )
     _add_email(
         db,
         box_b.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 10, 15, 15, 0),
         provider_message_id="b-1515",
     )
@@ -202,7 +202,7 @@ def test_label_stats_all_accounts_and_exact_datetime_bound():
     )
     assert bounded.status_code == 200, bounded.text
     assert bounded.json()["total"] == 1
-    assert bounded.json()["label_counts"]["interview"] == 1
+    assert bounded.json()["label_counts"]["interview_scheduled"] == 1
 
     everyone = client.get(
         "/api/mailboxes/label-stats",
@@ -212,8 +212,8 @@ def test_label_stats_all_accounts_and_exact_datetime_bound():
     body = everyone.json()
     assert body["mailbox_id"] is None
     assert body["total"] == 3
-    assert body["label_counts"]["interview"] == 2
-    assert body["label_counts"]["rejected"] == 1
+    assert body["label_counts"]["interview_scheduled"] == 2
+    assert body["label_counts"]["rejected_closed"] == 1
 
 
 def test_label_timeline_uses_hour_or_day_buckets():
@@ -223,21 +223,21 @@ def test_label_timeline_uses_hour_or_day_buckets():
     _add_email(
         db,
         box.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 10, 12, 20, 0),
         provider_message_id="same-day",
     )
     _add_email(
         db,
         box.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 2, 9, 0, 0),
         provider_message_id="day-one",
     )
     _add_email(
         db,
         box.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 4, 9, 0, 0),
         provider_message_id="day-three",
     )
@@ -248,7 +248,7 @@ def test_label_timeline_uses_hour_or_day_buckets():
     client = _client(SessionLocal)
     hours = client.get(
         f"/api/mailboxes/{mailbox_id}/label-timeline",
-        params={"label": "rejected", "date_from": "2026-08-10", "date_to": "2026-08-10"},
+        params={"label": "rejected_closed", "date_from": "2026-08-10", "date_to": "2026-08-10"},
     )
     assert hours.status_code == 200, hours.text
     hour_body = hours.json()
@@ -259,7 +259,7 @@ def test_label_timeline_uses_hour_or_day_buckets():
 
     days = client.get(
         f"/api/mailboxes/{mailbox_id}/label-timeline",
-        params={"label": "rejected", "date_from": "2026-08-01", "date_to": "2026-08-05"},
+        params={"label": "rejected_closed", "date_from": "2026-08-01", "date_to": "2026-08-05"},
     )
     assert days.status_code == 200, days.text
     day_body = days.json()

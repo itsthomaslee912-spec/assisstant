@@ -4,24 +4,23 @@ import json
 import logging
 import re
 
-from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.models import EmailLabel, EmailMessage
+from app.services.ai_backend import get_ai_backend
 
 logger = logging.getLogger(__name__)
 
 OUTCOME_LABELS = frozenset(
     {
-        EmailLabel.APPLIED.value,
-        EmailLabel.REJECTED.value,
+        EmailLabel.APPLICATION_CONFIRMATION.value,
+        EmailLabel.REJECTED_CLOSED.value,
         EmailLabel.SCREENING.value,
-        EmailLabel.INTERVIEW.value,
+        EmailLabel.INTERVIEW_SCHEDULED.value,
     }
 )
-# Applied is extracted for new mail and label changes only, not for stored mail.
-BACKFILL_LABELS = OUTCOME_LABELS - {EmailLabel.APPLIED.value}
+# Application confirmations are extracted for new mail and label changes only.
+BACKFILL_LABELS = OUTCOME_LABELS - {EmailLabel.APPLICATION_CONFIRMATION.value}
 
 _FIELD_LIMIT = 255
 
@@ -73,17 +72,17 @@ async def extract_company_role(
     snippet: str,
 ) -> tuple[str, str] | None:
     """Return company and role, or None when extraction did not run or failed."""
-    settings = get_settings()
-    if not settings.openai_api_key:
+    backend = get_ai_backend()
+    if not backend.api_key:
         return None
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = backend.client()
     user_content = (
         f"From: {sender}\nSubject: {subject}\nSnippet: {snippet}\n\nBody:\n{(body_text or '')[:6000]}"
     )
     try:
         response = await client.chat.completions.create(
-            model=settings.openai_model,
+            model=backend.model,
             temperature=0,
             response_format={"type": "json_object"},
             messages=[
@@ -92,14 +91,14 @@ async def extract_company_role(
             ],
         )
     except Exception:
-        logger.exception("OpenAI company/role extraction failed")
+        logger.exception("%s company/role extraction failed", backend.provider)
         return None
     content = response.choices[0].message.content or "{}"
     return parse_company_role(content)
 
 
 async def apply_outcome(db: Session, email: EmailMessage, *, force: bool = False) -> bool:
-    """Store company and role when the label is applied, rejected, screening, or interview.
+    """Store company and role for selected recruiting stages.
 
     Returns True when a result was saved. A failed or skipped call leaves
     outcome_extracted false so a later pass can retry.

@@ -155,21 +155,38 @@ async def gmail_get_profile(access_token: str) -> dict:
         return resp.json()
 
 
+class GmailHistoryExpired(Exception):
+    pass
+
+
 async def gmail_list_history(access_token: str, start_history_id: str) -> dict:
+    """Read a complete history round before its returned cursor can be saved."""
+    history: list[dict] = []
+    page_token: str | None = None
+    latest_history_id = start_history_id
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{GMAIL_API}/users/me/history",
-            headers={"Authorization": f"Bearer {access_token}"},
-            params={
+        while True:
+            params = {
                 "startHistoryId": start_history_id,
-                "historyTypes": "messageAdded",
-            },
-        )
-        if resp.status_code == 404:
-            return {"history": [], "historyId": start_history_id}
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=400, detail=f"Gmail history failed: {resp.text}")
-        return resp.json()
+                "maxResults": 500,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await client.get(
+                f"{GMAIL_API}/users/me/history",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params=params,
+            )
+            if resp.status_code == 404:
+                raise GmailHistoryExpired("Gmail history cursor expired")
+            if resp.status_code >= 400:
+                raise HTTPException(status_code=400, detail=f"Gmail history failed: {resp.text}")
+            data = resp.json()
+            history.extend(data.get("history") or [])
+            latest_history_id = str(data.get("historyId") or latest_history_id)
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return {"history": history, "historyId": latest_history_id}
 
 
 async def gmail_get_message(access_token: str, message_id: str) -> dict:
@@ -179,6 +196,8 @@ async def gmail_get_message(access_token: str, message_id: str) -> dict:
             headers={"Authorization": f"Bearer {access_token}"},
             params={"format": "full"},
         )
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Gmail message no longer exists")
         if resp.status_code >= 400:
             raise HTTPException(status_code=400, detail=f"Gmail get message failed: {resp.text}")
         return resp.json()
@@ -294,20 +313,32 @@ async def gmail_list_recent_message_ids(access_token: str, max_results: int = 10
     return ids
 
 
+def _gmail_recipient_query(query: str, recipient: str | None) -> str:
+    address = (recipient or "").strip()
+    if not address:
+        return query
+    return f"({query}) (to:{address} OR cc:{address} OR bcc:{address} OR deliveredto:{address})"
+
+
 async def gmail_list_inbox_message_ids(
-    access_token: str, max_results: int = 10000
+    access_token: str, max_results: int = 10000, recipient: str | None = None,
 ) -> tuple[list[str], int]:
     """Page through Inbox, Spam, Trash, and Archive until max_results ids (Gmail max 500 per page)."""
     async with httpx.AsyncClient(timeout=60) as client:
-        return await _gmail_list_ids_for_query(client, access_token, GMAIL_COMBINED_QUERY, max_results)
+        query = _gmail_recipient_query(GMAIL_COMBINED_QUERY, recipient)
+        return await _gmail_list_ids_for_query(client, access_token, query, max_results)
 
 
-async def gmail_list_folder_id_map(access_token: str, max_results: int = 10000) -> dict[str, str]:
+async def gmail_list_folder_id_map(
+    access_token: str, max_results: int = 10000, recipient: str | None = None,
+) -> dict[str, str]:
     """Map message ids to inbox/spam/trash/archive. Later folders overwrite (trash wins)."""
     mapping: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=60) as client:
         for folder, query in GMAIL_FOLDER_QUERIES:
-            ids, _estimate = await _gmail_list_ids_for_query(client, access_token, query, max_results)
+            ids, _estimate = await _gmail_list_ids_for_query(
+                client, access_token, _gmail_recipient_query(query, recipient), max_results
+            )
             for mid in ids:
                 mapping[mid] = folder
     return mapping

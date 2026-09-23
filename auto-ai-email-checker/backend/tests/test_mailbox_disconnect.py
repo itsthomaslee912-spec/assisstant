@@ -68,7 +68,7 @@ def _seed_mailbox(db, *, external_id: str, email_address: str, provider_message_
         sender="recruiter@example.com",
         snippet="interview next week",
         body_text="Can you interview next week?",
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
     )
     db.add(email)
     db.commit()
@@ -95,8 +95,8 @@ def test_disconnect_deletes_emails_and_corrections():
     db.add(
         ClassifyCorrection(
             email_id=thomas_email.id,
-            previous_label=EmailLabel.OTHERS.value,
-            corrected_label=EmailLabel.INTERVIEW.value,
+            previous_label=EmailLabel.OTHER.value,
+            corrected_label=EmailLabel.INTERVIEW_SCHEDULED.value,
             subject=thomas_email.subject,
             sender=thomas_email.sender,
             snippet=thomas_email.snippet,
@@ -191,8 +191,8 @@ def test_purge_orphaned_emails_removes_disconnected_and_missing_mailbox_rows():
     db.add(
         ClassifyCorrection(
             email_id=disconnected_email.id,
-            previous_label=EmailLabel.OTHERS.value,
-            corrected_label=EmailLabel.INTERVIEW.value,
+            previous_label=EmailLabel.OTHER.value,
+            corrected_label=EmailLabel.INTERVIEW_SCHEDULED.value,
         )
     )
     disconnected.is_active = False

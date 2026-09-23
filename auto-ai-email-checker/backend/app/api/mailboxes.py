@@ -88,7 +88,7 @@ def _count_labels(db: Session, mailbox_ids: list[int], start: datetime, end: dat
     )
     total = 0
     for lab, count in rows:
-        key = lab if lab in valid else EmailLabel.OTHERS.value
+        key = lab if lab in valid else EmailLabel.OTHER.value
         n = int(count)
         label_counts[key] = label_counts.get(key, 0) + n
         total += n
@@ -259,10 +259,10 @@ def mailbox_outcomes(
             mailbox_id=mailbox_id,
             date_from=start_label,
             date_to=end_label,
-            applied=grouped[EmailLabel.APPLIED.value],
-            rejected=grouped[EmailLabel.REJECTED.value],
+            application_confirmation=grouped[EmailLabel.APPLICATION_CONFIRMATION.value],
+            rejected_closed=grouped[EmailLabel.REJECTED_CLOSED.value],
             screening=grouped[EmailLabel.SCREENING.value],
-            interview=grouped[EmailLabel.INTERVIEW.value],
+            interview_scheduled=grouped[EmailLabel.INTERVIEW_SCHEDULED.value],
         )
     page = grouped[label]
     return MailboxOutcomesOut(
@@ -322,7 +322,7 @@ async def sync_mailbox(mailbox_id: int, db: Session = Depends(get_db)) -> dict:
     )
     if mailbox is None:
         raise HTTPException(status_code=404, detail="Mailbox not found")
-    status = await start_mailbox_sync(mailbox.id)
+    status = await start_mailbox_sync(mailbox.id, force_full=True)
     return {"ok": True, **status}
 
 
@@ -338,6 +338,21 @@ async def stop_mailbox_sync(mailbox_id: int, db: Session = Depends(get_db)) -> d
     if mailbox is None:
         raise HTTPException(status_code=404, detail="Mailbox not found")
     status = await request_stop_sync(mailbox.id)
+    return {"ok": True, **status}
+
+
+@router.post("/{mailbox_id}/sync/full")
+async def full_rescan_mailbox(mailbox_id: int, db: Session = Depends(get_db)) -> dict:
+    from app.services.mailbox_sync import start_mailbox_sync
+
+    mailbox = (
+        db.query(MailboxConnection)
+        .filter(MailboxConnection.id == mailbox_id, MailboxConnection.is_active.is_(True))
+        .one_or_none()
+    )
+    if mailbox is None:
+        raise HTTPException(status_code=404, detail="Mailbox not found")
+    status = await start_mailbox_sync(mailbox.id, force_full=True)
     return {"ok": True, **status}
 
 

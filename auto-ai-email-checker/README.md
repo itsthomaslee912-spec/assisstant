@@ -5,7 +5,7 @@ Real-time Gmail / Outlook inbox classifier. New mail is ingested via provider we
 **Branch:** `feature/auto-ai-email-checker`  
 **Stack:** React (Vite) frontend · FastAPI backend · SQLite · OpenAI
 
-Labels: `available` · `interview` · `assessment` · `rejected` · `applied` · `alert` · `others`
+Labels: Application Confirmation ? Application Action Required ? Screening ? Assessment ? Interview Invitation ? Interview Scheduled ? Interview Follow-up ? Offer ? Rejected / Closed ? Recruitment Alert ? Other
 
 ---
 
@@ -17,10 +17,16 @@ One-time setup (creates `.env`, Python venv, npm install):
 scripts\setup.bat
 ```
 
-Start backend + frontend together (two console windows):
+Start backend, frontend, and ngrok together (three console windows, if ngrok is installed):
 
 ```bat
 run.bat
+```
+
+Stop the servers and tunnel started by the launcher:
+
+```bat
+stop.bat
 ```
 
 Or from PowerShell:
@@ -31,6 +37,11 @@ Or from PowerShell:
 
 - Backend: http://127.0.0.1:8000  
 - Frontend: http://127.0.0.1:5173  
+
+Connected accounts without an active webhook are checked automatically every 2 minutes while the backend is running. Accounts with a registered, unexpired webhook use notifications instead of periodic polling; polling resumes if the subscription expires. This works without ngrok. Set `AUTO_SYNC_INTERVAL_SECONDS` and `AUTO_SYNC_MAX_MESSAGES` in `.env` to change the interval and recent-message limit. ngrok remains optional for immediate provider webhook updates.
+The first **Sync** for an account imports its history and saves provider cursors. Later **Sync** runs fetch changes from those cursors. Use **Full rescan** in the account controls to scan the mailbox again; an expired cursor also triggers a full rescan automatically. Cursor state is saved only after each batch of changes is processed.
+The inbox shows the current automatic sync state. If no account is connected, the sync worker stops, an account fails to sync, or the backend cannot be reached, a full-screen alert explains the issue and offers a connection or retry action. The alert clears after sync is available again.
+Relative SQLite database paths are resolved from `backend/`, regardless of where the launcher is run.
 
 Individual servers: `scripts\run-backend.bat` · `scripts\run-frontend.bat`
 
@@ -99,7 +110,7 @@ Open [http://localhost:5173](http://localhost:5173). The Vite proxy forwards `/a
 ngrok http 8000
 ```
 
-Set `WEBHOOK_BASE_URL` to the HTTPS URL (no trailing slash), e.g. `https://abc123.ngrok-free.app`, and restart the backend.
+`run.bat` starts ngrok automatically when it is installed and on PATH. Check its public URL at `http://127.0.0.1:4040`. Set `WEBHOOK_BASE_URL` to that HTTPS URL (no trailing slash), e.g. `https://abc123.ngrok-free.app`, and restart the backend if the URL changed. The PowerShell launcher still requires starting ngrok separately.
 
 ---
 
@@ -145,7 +156,8 @@ On Connect Outlook, the backend creates a Graph subscription on `me/mailFolders(
 | GET | `/api/auth/microsoft/callback` | OAuth callback |
 | GET | `/api/mailboxes` | Connected accounts |
 | DELETE | `/api/mailboxes/{id}` | Disconnect |
-| POST | `/api/mailboxes/{id}/sync` | Fetch recent mail and classify |
+| POST | `/api/mailboxes/{id}/sync` | Initial full import, then incremental sync |
+| POST | `/api/mailboxes/{id}/sync/full` | Full mailbox rescan |
 | POST | `/api/mailboxes/{id}/reclassify` | Re-run OpenAI labels on stored mail |
 | GET | `/api/emails?label=` | Classified inbox |
 | GET | `/api/events` | SSE stream (`email.classified`) |
@@ -162,57 +174,17 @@ frontend/src/         React dashboard (connect + live inbox)
 .env.example          Environment template
 ```
 
-## How OpenAI classifies email
+## How email classification works
 
-Classification runs on ingest (new mail / **Sync**) and again on **Reclassify**. The core function is `classify_email()` in `backend/app/classify/openai_classifier.py`.
+New mail and **Sync** use the active OpenAI classification prompt, with local rules for clear cases. The classifier chooses one of the eleven labels above. If no OpenAI key is configured, local rules classify clear cases and use **Other** for the rest.
 
-```
-Gmail/Outlook → ingest_normalized_message → classify_email
-  → keyword heuristics + OpenAI chat.completions
-  → merge (alert heuristic can override interview/available/applied)
-  → email_messages.label → inbox badges
-```
+**Interview Scheduled** also has a separate `interview_subtype` field: `confirmation`, `calendar_invite`, `reminder`, `reschedule`, `time_change`, or `cancellation`. These are metadata values, not extra categories. The message reader displays the subtype.
 
-1. Fetch the message (subject, from, snippet, body).
-2. Call `classify_email(...)` from `backend/app/services/ingest.py`.
-3. Save `label`, `confidence`, and `openai_response_id` on `email_messages`.
-4. Push an SSE `email.classified` event so the inbox updates live.
+Existing stored labels are migrated when the backend starts. Old interview messages with evidence of a confirmed booking become **Interview Scheduled**; other old interview messages become **Interview Invitation**. The active classification prompt is updated to the eleven-label taxonomy. Use **Reclassify** if you want OpenAI to revisit stored messages under the new definitions; this makes API calls and can take time.
 
-**Reclassify** (`POST /api/mailboxes/{id}/reclassify`) re-runs the same function on up to 200 existing emails without re-fetching from Gmail/Outlook.
-
-### What is sent to OpenAI
-
-Chat Completions with `temperature=0` and `response_format=json_object`:
-
-- **System prompt:** the seven labels and rules (rejected, interview, assessment, applied, alert, available, others).
-- **User payload:** `From`, `Subject`, `Snippet`, and the first 6000 characters of `body_text`.
-
-Expected JSON:
-
-```json
-{"label":"alert","confidence":0.86}
-```
-
-Invalid labels become `others`. The old `tech` label maps to `assessment`.
-
-If `OPENAI_API_KEY` is missing, only keyword heuristics run (or `others`).
-
-### Heuristics vs the model
-
-Rules run first on the combined subject/sender/body:
-
-- Clear rejection / assessment / true interview-invite phrases
-- Cold job-description blast (JD + send resume / unsubscribe / job portals) → **alert**
-
-Then OpenAI labels the mail. If heuristics say **alert** but the model says **interview**, **available**, or **applied**, the app **keeps alert**. That is why a recruiter JD that mentions “F2F Interview” is not an interview.
-
-### How to use it
-
-1. Keep `OPENAI_API_KEY` in `.env` and restart the backend after changing it.
-2. Click **Sync** to fetch and classify new mail.
-3. Click **Reclassify** to relabel mail already in the database (needed after prompt or heuristic changes).
+Human label corrections remain pinned during reclassification. Changing a message to **Interview Scheduled** also derives its subtype from the message text.
 
 ## Notes
 
-- Bid Manage System is intentionally out of scope for this branch.
-- Gmail watch lasts ~7 days; Outlook subscriptions ~3 days — the renewal loop refreshes both.
+- Gmail and Outlook webhooks need a public HTTPS tunnel for immediate updates. Local polling works without a tunnel.
+- The backend renews existing Gmail watches and Outlook subscriptions while it is running.

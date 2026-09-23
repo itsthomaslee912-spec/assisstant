@@ -1,19 +1,22 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  deleteClassifyTrainingExample,
+  deleteUnusedClassifyTraining,
   fetchClassifyPromptStatus,
   fetchClassifyTraining,
+  fetchAiSettings,
+  fetchOllamaModels,
+  fetchOpenAiCosts,
   fetchMailboxLabelStats,
-  fetchMailboxLabelTimeline,
-  fetchMailboxOutcomes,
+  saveAiSettings,
+  type AiSettings,
+  type OpenAiCosts,
   type ClassifyPromptStatus,
   type ClassifyTrainingExample,
-  type LabelTimeline,
   type Mailbox,
   type MailboxLabelStats,
-  type OutcomeEntry,
-  type OutcomeLabel,
 } from "../api";
-import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES } from "../labels";
+import { CLASSIFY_LABEL_TITLES, INTERVIEW_SUBTYPE_TITLES } from "../labels";
 import {
   FONT_FAMILIES,
   FONT_SIZES,
@@ -26,12 +29,10 @@ import {
 } from "../prefs";
 import type { ThemePref } from "../theme";
 import AccountSelect from "../components/AccountSelect";
-import CategoryLineChart from "../components/CategoryLineChart";
 import DateTimeField from "../components/DateTimeField";
-import LabelBarChart from "../components/LabelBarChart";
 import LabelPieChart from "../components/LabelPieChart";
 
-export type SettingsSection = "appearance" | "training" | "statistics";
+export type SettingsSection = "accounts" | "appearance" | "ai" | "training" | "statistics";
 
 const TRAINING_PAGE_SIZE = 20;
 
@@ -84,49 +85,6 @@ function initialsFrom(text: string): string {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
-const OUTCOME_PAGE_SIZE = 20;
-const CHART_LABELS = CLASSIFY_LABELS;
-const OUTCOME_CATEGORIES: { key: OutcomeLabel; title: string }[] = [
-  { key: "screening", title: "Screening" },
-  { key: "interview", title: "Interview" },
-  { key: "rejected", title: "Rejected" },
-];
-
-function tsvCell(value: string): string {
-  return value.replace(/[\t\r\n]+/g, " ");
-}
-
-function OutcomeTable({ rows }: { rows: OutcomeEntry[] }) {
-  return (
-    <section className="outcome-block">
-      {rows.length === 0 ? (
-        <p className="hint">None in this date range.</p>
-      ) : (
-        <div className="settings-table-wrap outcome-table">
-          <table className="settings-table">
-            <thead>
-              <tr>
-                <th>Company</th>
-                <th>Role</th>
-                <th>Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <tr key={`${index}-${row.received_at ?? ""}-${row.subject}`}>
-                  <td data-label="Company">{row.company || row.subject || "—"}</td>
-                  <td data-label="Role">{row.role || "—"}</td>
-                  <td data-label="Date">{formatWhen(row.received_at) || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export default function SettingsPage({
   section,
   onSectionChange,
@@ -145,6 +103,9 @@ export default function SettingsPage({
   unusedTraining,
   updatingPrompt,
   onUpdatePrompt,
+  onTrainingDeleted,
+  onAddAccount,
+  onRemoveAccount,
   initialMailboxId = null,
 }: {
   section: SettingsSection;
@@ -164,6 +125,9 @@ export default function SettingsPage({
   unusedTraining: number;
   updatingPrompt: boolean;
   onUpdatePrompt: () => Promise<void> | void;
+  onTrainingDeleted: () => Promise<void>;
+  onAddAccount: () => void;
+  onRemoveAccount: (mailboxId: number) => Promise<void>;
   initialMailboxId?: number | null;
 }) {
   const [promptStatus, setPromptStatus] = useState<ClassifyPromptStatus | null>(null);
@@ -172,6 +136,63 @@ export default function SettingsPage({
   const [trainingPage, setTrainingPage] = useState(0);
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const [trainingLoading, setTrainingLoading] = useState(section === "training");
+  const [trainingRevision, setTrainingRevision] = useState(0);
+  const [deletingTrainingId, setDeletingTrainingId] = useState<number | null>(null);
+  const [deletingUnused, setDeletingUnused] = useState(false);
+  const [trainingNotice, setTrainingNotice] = useState<string | null>(null);
+  const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [openaiAdminKey, setOpenaiAdminKey] = useState("");
+  const [openaiCosts, setOpenaiCosts] = useState<OpenAiCosts | null>(null);
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiNotice, setAiNotice] = useState<string | null>(null);
+  const [removingMailboxId, setRemovingMailboxId] = useState<number | null>(null);
+
+  useEffect(() => {
+    void fetchAiSettings().then((settings) => {
+      setAiSettings(settings);
+      if (settings.openai_admin_key_configured) {
+        void fetchOpenAiCosts().then(setOpenaiCosts).catch((err) => setAiNotice(err instanceof Error ? err.message : "Failed to load OpenAI costs"));
+      }
+    }).catch((err) => setAiNotice(err instanceof Error ? err.message : "Failed to load AI settings"));
+  }, []);
+
+  useEffect(() => {
+    if (!aiSettings || aiSettings.provider !== "ollama") return;
+    void fetchOllamaModels(aiSettings.ollama_url).then(setOllamaModels).catch(() => setOllamaModels([]));
+  }, [aiSettings?.provider, aiSettings?.ollama_url]);
+
+  async function saveModelSettings() {
+    if (!aiSettings || aiBusy) return;
+    setAiBusy(true);
+    setAiNotice(null);
+    try {
+      const saved = await saveAiSettings({
+        provider: aiSettings.provider,
+        openai_model: aiSettings.openai_model,
+        openai_api_key: openaiKey || undefined,
+        openai_admin_key: openaiAdminKey || undefined,
+        ollama_url: aiSettings.ollama_url,
+        ollama_model: aiSettings.ollama_model,
+      });
+      setAiSettings(saved);
+      setOpenaiKey("");
+      setOpenaiAdminKey("");
+      setAiNotice("AI model settings saved.");
+      if (saved.openai_admin_key_configured) {
+        try {
+          setOpenaiCosts(await fetchOpenAiCosts());
+        } catch (err) {
+          setAiNotice(err instanceof Error ? `Settings saved. ${err.message}` : "Settings saved, but costs could not be loaded.");
+        }
+      }
+    } catch (err) {
+      setAiNotice(err instanceof Error ? err.message : "Failed to save AI settings");
+    } finally {
+      setAiBusy(false);
+    }
+  }
 
   const dateDefaults = useMemo(() => defaultDateRange(), []);
   const [statsMailboxId, setStatsMailboxId] = useState<number | "all">(
@@ -180,23 +201,8 @@ export default function SettingsPage({
   const [dateFrom, setDateFrom] = useState(dateDefaults.from);
   const [dateTo, setDateTo] = useState(dateDefaults.to);
   const [stats, setStats] = useState<MailboxLabelStats | null>(null);
-  const [timelines, setTimelines] = useState<LabelTimeline[]>([]);
-  const [outcomeLabel, setOutcomeLabel] = useState<OutcomeLabel>("screening");
-  const [outcomePage, setOutcomePage] = useState(0);
-  const [outcomeItems, setOutcomeItems] = useState<OutcomeEntry[]>([]);
-  const [outcomeTotal, setOutcomeTotal] = useState(0);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
-  const [copying, setCopying] = useState(false);
-  const [copyNote, setCopyNote] = useState<string | null>(null);
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   useEffect(() => {
     if (section !== "training") return;
@@ -229,12 +235,44 @@ export default function SettingsPage({
     return () => {
       cancelled = true;
     };
-  }, [section, unusedTraining, trainingPage]);
+  }, [section, unusedTraining, trainingPage, trainingRevision]);
+
+  async function deleteTrainingExample(id: number) {
+    setDeletingTrainingId(id);
+    setTrainingError(null);
+    setTrainingNotice(null);
+    try {
+      await deleteClassifyTrainingExample(id);
+      setTrainingNotice("Unused training example deleted.");
+      setTrainingRevision((revision) => revision + 1);
+      await onTrainingDeleted();
+    } catch (err) {
+      setTrainingError(err instanceof Error ? err.message : "Failed to delete training example");
+    } finally {
+      setDeletingTrainingId(null);
+    }
+  }
+
+  async function deleteAllUnusedTraining() {
+    if (!window.confirm(`Delete all ${unusedTraining} unused training examples? This cannot be undone.`)) return;
+    setDeletingUnused(true);
+    setTrainingError(null);
+    setTrainingNotice(null);
+    try {
+      const result = await deleteUnusedClassifyTraining();
+      setTrainingNotice(`Deleted ${result.deleted} unused training example${result.deleted === 1 ? "" : "s"}.`);
+      setTrainingPage(0);
+      setTrainingRevision((revision) => revision + 1);
+      await onTrainingDeleted();
+    } catch (err) {
+      setTrainingError(err instanceof Error ? err.message : "Failed to delete unused training examples");
+    } finally {
+      setDeletingUnused(false);
+    }
+  }
 
   async function loadStats(
     event?: FormEvent,
-    page = outcomePage,
-    label: OutcomeLabel = outcomeLabel,
     mailboxId: number | "all" = statsMailboxId
   ) {
     event?.preventDefault();
@@ -246,83 +284,13 @@ export default function SettingsPage({
     const toIso = localInputToUtcIso(dateTo);
     setStatsLoading(true);
     setStatsError(null);
-    setCopyNote(null);
     try {
-      if (mailboxId === "all") {
-        const result = await fetchMailboxLabelStats("all", fromIso, toIso);
-        setStats(result);
-        setTimelines([]);
-        setOutcomeItems([]);
-        setOutcomeTotal(0);
-        return;
-      }
-      const [result, lineResults, outcomeResult] = await Promise.all([
-        fetchMailboxLabelStats(mailboxId, fromIso, toIso),
-        Promise.all(CHART_LABELS.map((lineLabel) => fetchMailboxLabelTimeline(mailboxId, lineLabel, fromIso, toIso))),
-        label === "applied"
-          ? Promise.resolve(null)
-          : fetchMailboxOutcomes(mailboxId, fromIso, toIso, {
-              label,
-              limit: OUTCOME_PAGE_SIZE,
-              offset: page * OUTCOME_PAGE_SIZE,
-            }),
-      ]);
-      setStats(result);
-      setTimelines(lineResults);
-      setOutcomeItems(outcomeResult?.items ?? []);
-      setOutcomeTotal(outcomeResult?.total ?? 0);
+      setStats(await fetchMailboxLabelStats(mailboxId, fromIso, toIso));
     } catch (err) {
       setStats(null);
-      setTimelines([]);
-      setOutcomeItems([]);
-      setOutcomeTotal(0);
       setStatsError(err instanceof Error ? err.message : "Failed to load statistics");
     } finally {
       setStatsLoading(false);
-    }
-  }
-
-  function selectOutcome(label: OutcomeLabel) {
-    setOutcomeLabel(label);
-    setOutcomePage(0);
-    setOutcomeItems([]);
-    setOutcomeTotal(0);
-    void loadStats(undefined, 0, label);
-  }
-
-  async function copyOutcomeResults() {
-    if (statsMailboxId === "all" || outcomeLabel === "applied") return;
-    setCopying(true);
-    setCopyNote(null);
-    try {
-      const fromIso = localInputToUtcIso(dateFrom);
-      const toIso = localInputToUtcIso(dateTo);
-      const rows: OutcomeEntry[] = [];
-      let offset = 0;
-      let total = 0;
-      do {
-        const page = await fetchMailboxOutcomes(statsMailboxId, fromIso, toIso, {
-          label: outcomeLabel,
-          limit: 100,
-          offset,
-        });
-        total = page.total;
-        rows.push(...page.items);
-        offset += page.items.length;
-        if (page.items.length === 0) break;
-      } while (rows.length < total);
-      const lines = [
-        "Company\tRole\tDate\tSubject",
-        ...rows.map((row) =>
-          [row.company, row.role, formatWhen(row.received_at), row.subject].map(tsvCell).join("\t")
-        ),
-      ];
-      await navigator.clipboard.writeText(lines.join("\n"));
-      setCopyNote(`Copied ${rows.length}`);
-    } catch (err) {
-      setCopyNote(err instanceof Error ? err.message : "Could not copy");
-    } finally {
-      setCopying(false);
     }
   }
 
@@ -338,13 +306,15 @@ export default function SettingsPage({
   }
 
   const navItems: { id: SettingsSection; label: string }[] = [
+    { id: "accounts", label: "Accounts" },
     { id: "appearance", label: "Appearance" },
+    { id: "ai", label: "AI model" },
     { id: "training", label: "Training" },
     { id: "statistics", label: "Statistics" },
   ];
 
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <main className="settings-page" aria-labelledby="settings-title">
       <div className="settings-shell">
         <header className="settings-top">
           <h2 id="settings-title">Settings</h2>
@@ -372,6 +342,43 @@ export default function SettingsPage({
             ))}
           </nav>
           <div className="settings-content">
+            {section === "accounts" && (
+              <div className="settings-panel">
+                <section className="settings-block">
+                  <div className="settings-block-heading">
+                    <div>
+                      <h3>Email accounts</h3>
+                      <p className="settings-help">Add connected inboxes or remove accounts you no longer want to sync.</p>
+                    </div>
+                    <button type="button" className="action-btn primary" onClick={onAddAccount}>+ Add an account</button>
+                  </div>
+                  <div className="settings-account-list">
+                    {mailboxes.map((mailbox) => (
+                      <div className="settings-account-row" key={mailbox.id}>
+                        <div>
+                          <strong>{mailbox.email_address}</strong>
+                          <span>{mailbox.provider === "google" ? "Google Gmail" : "Microsoft Outlook"}</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="action-btn danger"
+                          disabled={removingMailboxId != null}
+                          onClick={() => {
+                            if (!window.confirm(`Remove ${mailbox.email_address} from this app?`)) return;
+                            setRemovingMailboxId(mailbox.id);
+                            void onRemoveAccount(mailbox.id).finally(() => setRemovingMailboxId(null));
+                          }}
+                        >
+                          {removingMailboxId === mailbox.id ? "Removing…" : "Remove"}
+                        </button>
+                      </div>
+                    ))}
+                    {!mailboxes.length && <p className="settings-help">No email accounts are connected.</p>}
+                  </div>
+                </section>
+              </div>
+            )}
+
             {section === "appearance" && (
               <div className="settings-panel">
                 <section className="settings-block">
@@ -387,7 +394,7 @@ export default function SettingsPage({
                         className={viewMode === mode ? "seg-btn active" : "seg-btn"}
                         onClick={() => onViewModeChange(mode)}
                       >
-                        {mode === "list" ? "List" : "Card"}
+                        {mode === "list" ? "List" : mode === "card" ? "Card" : "Table"}
                       </button>
                     ))}
                   </div>
@@ -462,12 +469,90 @@ export default function SettingsPage({
               </div>
             )}
 
+            {section === "ai" && (
+              <div className="settings-panel">
+                <section className="settings-block ai-model-settings">
+                  <h3>Classification model</h3>
+                  <p className="settings-help">Choose the service used by Reclassify, prompt updates, and company or role extraction.</p>
+                  {aiSettings ? (
+                    <>
+                      <div className="model-choice" role="radiogroup" aria-label="AI provider">
+                        {(["openai", "ollama"] as const).map((provider) => (
+                          <button key={provider} type="button" role="radio"
+                            aria-checked={aiSettings.provider === provider}
+                            className={aiSettings.provider === provider ? "model-card active" : "model-card"}
+                            onClick={() => setAiSettings({ ...aiSettings, provider })}>
+                            <strong>{provider === "openai" ? "OpenAI" : "Local AI (Ollama)"}</strong>
+                            <span>{provider === "openai" ? "Cloud model using your API key" : "Private model on your local server"}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {aiSettings.provider === "openai" ? (
+                        <div className="ai-fields">
+                          <label className="settings-field">OpenAI model
+                            <input value={aiSettings.openai_model} onChange={(e) => setAiSettings({ ...aiSettings, openai_model: e.target.value })} />
+                          </label>
+                          <label className="settings-field">OpenAI API key
+                            <input type="password" autoComplete="new-password" value={openaiKey}
+                              placeholder={aiSettings.openai_key_configured ? "Key is saved — enter a new key to replace it" : "sk-..."}
+                              onChange={(e) => setOpenaiKey(e.target.value)} />
+                          </label>
+                          <label className="settings-field">Organization admin key
+                            <input type="password" autoComplete="new-password" value={openaiAdminKey}
+                              placeholder={aiSettings.openai_admin_key_configured ? "Admin key is saved — enter a new key to replace it" : "sk-admin-..."}
+                              onChange={(e) => setOpenaiAdminKey(e.target.value)} />
+                          </label>
+                          <div className="balance-card">
+                            <strong>OpenAI billing</strong>
+                            {openaiCosts
+                              ? <span>Organization spend this month: <strong>${openaiCosts.month_spend_usd.toFixed(2)}</strong></span>
+                              : <span>Save an organization admin key to show this month&apos;s organization spend.</span>}
+                            <span>OpenAI does not provide a documented remaining credit-balance endpoint.</span>
+                            {aiSettings.openai_admin_key_configured && (
+                              <button type="button" className="action-btn" onClick={() => void fetchOpenAiCosts().then(setOpenaiCosts).catch((err) => setAiNotice(err instanceof Error ? err.message : "Failed to load OpenAI costs"))}>
+                                Refresh spending
+                              </button>
+                            )}
+                            <a href={aiSettings.billing_url} target="_blank" rel="noreferrer">Open billing dashboard</a>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="ai-fields">
+                          <label className="settings-field">Ollama server
+                            <input value={aiSettings.ollama_url} onChange={(e) => setAiSettings({ ...aiSettings, ollama_url: e.target.value })} />
+                          </label>
+                          <label className="settings-field">Ollama model
+                            <select value={aiSettings.ollama_model} onChange={(e) => setAiSettings({ ...aiSettings, ollama_model: e.target.value })}>
+                              {!ollamaModels.includes(aiSettings.ollama_model) && <option value={aiSettings.ollama_model}>{aiSettings.ollama_model}</option>}
+                              {ollamaModels.map((model) => (
+                                <option key={model} value={model}>
+                                  {model}{model === "qwen2.5:14b-instruct" ? " — Recommended" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <p className="settings-help">
+                            Recommended: qwen2.5:14b-instruct for accurate JSON classification with moderate resource use.
+                            Gitea: 192.168.2.230:5000 · Ollama: 192.168.2.230:11440
+                          </p>
+                        </div>
+                      )}
+                      <button type="button" className="action-btn primary" disabled={aiBusy} onClick={() => void saveModelSettings()}>
+                        {aiBusy ? "Saving…" : "Save AI settings"}
+                      </button>
+                      {aiNotice && <p className="settings-help" role="status">{aiNotice}</p>}
+                    </>
+                  ) : <p className="settings-help">Loading AI settings…</p>}
+                </section>
+              </div>
+            )}
+
             {section === "training" && (
               <div className="settings-panel">
                 <section className="settings-block">
                   <h3>Classification training</h3>
                   <p className="settings-help">
-                    Corrections saved from the reader. Unused examples can update the classify prompt.
+                    Category and interview subtype corrections saved from the reader. Unused examples can update the classify prompt.
                   </p>
                   <div className="settings-status-row">
                     <p>
@@ -483,28 +568,39 @@ export default function SettingsPage({
                         {` · updated ${formatWhen(promptStatus.updated_at)}`}
                       </p>
                     ) : null}
-                    <button
-                      type="button"
-                      className={updatingPrompt ? "action-btn busy" : "action-btn"}
-                      disabled={updatingPrompt || unusedTraining <= 0}
-                      onClick={() => void handleUpdatePrompt()}
-                    >
-                      {updatingPrompt ? (
-                        <>
-                          <span className="spinner" aria-hidden="true" />
-                          Updating prompt
-                        </>
-                      ) : unusedTraining > 0 ? (
-                        `Update prompt (${unusedTraining})`
-                      ) : (
-                        "Update prompt"
-                      )}
-                    </button>
+                    <div className="training-actions">
+                      <button
+                        type="button"
+                        className={updatingPrompt ? "action-btn busy" : "action-btn"}
+                        disabled={updatingPrompt || deletingUnused || deletingTrainingId != null || unusedTraining <= 0}
+                        onClick={() => void handleUpdatePrompt()}
+                      >
+                        {updatingPrompt ? (
+                          <>
+                            <span className="spinner" aria-hidden="true" />
+                            Updating prompt
+                          </>
+                        ) : unusedTraining > 0 ? (
+                          `Update prompt (${unusedTraining})`
+                        ) : (
+                          "Update prompt"
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="action-btn danger"
+                        disabled={updatingPrompt || deletingUnused || deletingTrainingId != null || unusedTraining <= 0}
+                        onClick={() => void deleteAllUnusedTraining()}
+                      >
+                        {deletingUnused ? "Deleting..." : "Delete all unused"}
+                      </button>
+                    </div>
                   </div>
                   {trainingError && <p className="error">{trainingError}</p>}
+                  {trainingNotice && <p className="hint" role="status">{trainingNotice}</p>}
                   {trainingLoading && <p className="hint">Loading training data…</p>}
                   {!trainingLoading && training.length === 0 && !trainingError && (
-                    <p className="hint">Correct a category and save it as training data first.</p>
+                    <p className="hint">Correct a category or interview subtype to create training data.</p>
                   )}
                   {training.length > 0 && (
                     <div className="training-cards">
@@ -527,19 +623,30 @@ export default function SettingsPage({
                               {row.snippet ? <span className="msg-snippet">{row.snippet}</span> : null}
                               <span className="msg-card-meta">
                                 <span className={`label list-label label-${row.previous_label}`}>
-                                  {titleForLabel(row.previous_label)}
+                                  {titleForLabel(row.previous_label)}{row.previous_subtype ? ` · ${INTERVIEW_SUBTYPE_TITLES[row.previous_subtype]}` : ""}
                                 </span>
                                 <span className="training-arrow" aria-hidden="true">
                                   →
                                 </span>
                                 <span className={`label list-label label-${row.corrected_label}`}>
-                                  {titleForLabel(row.corrected_label)}
+                                  {titleForLabel(row.corrected_label)}{row.corrected_subtype ? ` · ${INTERVIEW_SUBTYPE_TITLES[row.corrected_subtype]}` : ""}
                                 </span>
                                 <span className={used ? "read-pill" : "new-pill"}>
                                   {used ? "Used" : "Unused"}
                                 </span>
                               </span>
                             </span>
+                            {!used && (
+                              <button
+                                type="button"
+                                className="action-btn danger training-delete"
+                                aria-label={`Delete unused training example: ${row.subject || "(no subject)"}`}
+                                disabled={updatingPrompt || deletingUnused || deletingTrainingId != null}
+                                onClick={() => void deleteTrainingExample(row.id)}
+                              >
+                                {deletingTrainingId === row.id ? "Deleting..." : "Delete"}
+                              </button>
+                            )}
                           </article>
                         );
                       })}
@@ -581,13 +688,12 @@ export default function SettingsPage({
                   <h3>Category statistics</h3>
                   <p className="settings-help">
                     Counts from the start of today through now. All accounts shows every mailbox.
-                    One account shows every category on the pie and the line chart. Company and role are listed for screening, interview, and rejected.
+                    The pie chart shows the category distribution for the selected account or all accounts.
                   </p>
                   <form
-                    className="stats-form"
+                    className="stats-form stats-filter-card"
                     onSubmit={(event) => {
-                      setOutcomePage(0);
-                      void loadStats(event, 0);
+                      void loadStats(event);
                     }}
                   >
                     <AccountSelect
@@ -595,12 +701,8 @@ export default function SettingsPage({
                       mailboxes={mailboxes}
                       onChange={(value) => {
                         setStatsMailboxId(value);
-                        setOutcomePage(0);
                         setStats(null);
-                        setTimelines([]);
-                        setOutcomeItems([]);
-                        setOutcomeTotal(0);
-                        void loadStats(undefined, 0, outcomeLabel, value);
+                        void loadStats(undefined, value);
                       }}
                     />
                     <DateTimeField label="From" value={dateFrom} onChange={setDateFrom} />
@@ -614,93 +716,9 @@ export default function SettingsPage({
                     <p className="hint">No emails in this date range.</p>
                   )}
                   {stats && (
-                    <div className="stats-chart-scroll">
-                      <LabelBarChart counts={stats.label_counts} total={stats.total} />
-                    </div>
-                  )}
-                  {stats && statsMailboxId !== "all" && (
                     <div className="stats-visuals stats-account">
-                      <LabelPieChart
-                        counts={stats.label_counts}
-                        active={outcomeLabel}
-                        onSelect={selectOutcome}
-                      />
-                      <CategoryLineChart series={timelines} />
+                      <LabelPieChart counts={stats.label_counts} />
                     </div>
-                  )}
-                  {statsMailboxId !== "all" && stats && (
-                    <section className="outcome-block">
-                      <div className="outcome-toolbar">
-                        <div className="folder-badges" role="tablist" aria-label="Outcome category">
-                          {OUTCOME_CATEGORIES.map((item) => (
-                            <button
-                              key={item.key}
-                              type="button"
-                              className={outcomeLabel === item.key ? "folder-badge active" : "folder-badge"}
-                              onClick={() => selectOutcome(item.key)}
-                            >
-                              {item.title}
-                              {outcomeLabel === item.key ? (
-                                <span className="count-pill">{outcomeTotal}</span>
-                              ) : null}
-                            </button>
-                          ))}
-                        </div>
-                        {outcomeLabel !== "applied" && (
-                          <button
-                            type="button"
-                            className="action-btn"
-                            disabled={copying || outcomeTotal === 0}
-                            onClick={() => void copyOutcomeResults()}
-                          >
-                            {copying ? "Copying…" : "Copy"}
-                          </button>
-                        )}
-                      </div>
-                      {outcomeLabel === "applied" ? (
-                        <p className="hint">Company and role are not listed for Applied.</p>
-                      ) : (
-                        <>
-                          {copyNote && <p className="hint">{copyNote}</p>}
-                          <OutcomeTable rows={outcomeItems} />
-                          {outcomeTotal > OUTCOME_PAGE_SIZE && (
-                            <div className="training-pager">
-                              <button
-                                type="button"
-                                className="action-btn"
-                                disabled={statsLoading || outcomePage === 0}
-                                onClick={() => {
-                                  const next = Math.max(0, outcomePage - 1);
-                                  setOutcomePage(next);
-                                  void loadStats(undefined, next);
-                                }}
-                              >
-                                Previous
-                              </button>
-                              <span>
-                                Page {outcomePage + 1} of {Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE)} ·{" "}
-                                {outcomeTotal}
-                              </span>
-                              <button
-                                type="button"
-                                className="action-btn"
-                                disabled={
-                                  statsLoading ||
-                                  outcomePage >= Math.ceil(outcomeTotal / OUTCOME_PAGE_SIZE) - 1
-                                }
-                                onClick={() => {
-                                  const next = outcomePage + 1;
-                                  setOutcomePage(next);
-                                  void loadStats(undefined, next);
-                                }}
-                              >
-                                Next
-                              </button>
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </section>
                   )}
                 </section>
               </div>
@@ -708,6 +726,6 @@ export default function SettingsPage({
           </div>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

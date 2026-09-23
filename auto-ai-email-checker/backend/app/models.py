@@ -16,14 +16,18 @@ class Provider(str, Enum):
 
 
 class EmailLabel(str, Enum):
-    JOB_ALERT = "job_alert"
-    APPLIED = "applied"
+    UNKNOWN = "unknown"
+    APPLICATION_CONFIRMATION = "application_confirmation"
+    APPLICATION_ACTION_REQUIRED = "application_action_required"
     SCREENING = "screening"
-    INTERVIEW = "interview"
     ASSESSMENT = "assessment"
+    INTERVIEW_INVITATION = "interview_invitation"
+    INTERVIEW_SCHEDULED = "interview_scheduled"
+    INTERVIEW_FOLLOW_UP = "interview_follow_up"
     OFFER = "offer"
-    REJECTED = "rejected"
-    OTHERS = "others"
+    REJECTED_CLOSED = "rejected_closed"
+    RECRUITMENT_ALERT = "recruitment_alert"
+    OTHER = "other"
 
 
 class MailFolder(str, Enum):
@@ -57,7 +61,8 @@ class MailboxConnection(Base):
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     provider_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Gmail history / Outlook delta cursors
-    sync_cursor: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    sync_cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    full_sync_completed: Mapped[bool] = mapped_column(default=False)
     is_active: Mapped[bool] = mapped_column(default=True)
     # One-shot: received_at rewritten from provider UTC (fixes SQLite tz stripping)
     received_at_utc_fixed: Mapped[bool] = mapped_column(default=False)
@@ -96,7 +101,8 @@ class EmailMessage(Base):
     snippet: Mapped[str] = mapped_column(Text, default="")
     body_text: Mapped[str] = mapped_column(Text, default="")
     body_html: Mapped[str] = mapped_column(Text, default="")
-    label: Mapped[str] = mapped_column(String(32), index=True, default=EmailLabel.OTHERS.value)
+    label: Mapped[str] = mapped_column(String(32), index=True, default=EmailLabel.OTHER.value)
+    interview_subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
     company: Mapped[str | None] = mapped_column(String(255), nullable=True)
     job_role: Mapped[str | None] = mapped_column(String(255), nullable=True)
     outcome_extracted: Mapped[bool] = mapped_column(default=False)
@@ -124,6 +130,8 @@ class ClassifyCorrection(Base):
     )
     previous_label: Mapped[str] = mapped_column(String(32))
     corrected_label: Mapped[str] = mapped_column(String(32), index=True)
+    previous_subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    corrected_subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
     subject: Mapped[str] = mapped_column(String(998), default="")
     sender: Mapped[str] = mapped_column(String(512), default="")
     snippet: Mapped[str] = mapped_column(Text, default="")
@@ -146,6 +154,18 @@ class ClassifyPromptVersion(Base):
     openai_response_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     example_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AiSettings(Base):
+    __tablename__ = "ai_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    provider: Mapped[str] = mapped_column(String(16), default="openai")
+    openai_key_enc: Mapped[str] = mapped_column(Text, default="")
+    openai_admin_key_enc: Mapped[str] = mapped_column(Text, default="")
+    openai_model: Mapped[str] = mapped_column(String(128), default="gpt-4o-mini")
+    ollama_url: Mapped[str] = mapped_column(String(255), default="http://192.168.2.230:11440")
+    ollama_model: Mapped[str] = mapped_column(String(128), default="qwen2.5:14b-instruct")
 
 
 class WebhookSubscription(Base):

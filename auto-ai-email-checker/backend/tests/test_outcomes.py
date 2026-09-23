@@ -108,7 +108,7 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 10, 12, 0, 0),
         provider_message_id="rej-old",
         company="Acme",
@@ -118,7 +118,7 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 20, 9, 0, 0),
         provider_message_id="rej-new",
         company="acme",
@@ -128,7 +128,7 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 11, 9, 0, 0),
         provider_message_id="rej-blank-1",
         company="",
@@ -139,7 +139,7 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 8, 12, 9, 0, 0),
         provider_message_id="rej-blank-2",
         company="",
@@ -160,9 +160,9 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
         received_at=datetime(2026, 8, 16, 9, 0, 0),
-        provider_message_id="interview",
+        provider_message_id="interview_scheduled",
         company="Notion",
         job_role="Product Engineer",
         outcome_extracted=True,
@@ -170,16 +170,16 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.APPLIED.value,
+        label=EmailLabel.APPLICATION_CONFIRMATION.value,
         received_at=datetime(2026, 8, 17, 9, 0, 0),
-        provider_message_id="applied",
+        provider_message_id="application_confirmation",
         company="Ignored Co",
         job_role="Ignored Role",
     )
     _add_email(
         db,
         box_a.id,
-        label=EmailLabel.REJECTED.value,
+        label=EmailLabel.REJECTED_CLOSED.value,
         received_at=datetime(2026, 1, 2, 9, 0, 0),
         provider_message_id="out-of-range",
         company="Old Co",
@@ -189,7 +189,7 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     _add_email(
         db,
         box_b.id,
-        label=EmailLabel.INTERVIEW.value,
+        label=EmailLabel.INTERVIEW_SCHEDULED.value,
         received_at=datetime(2026, 8, 18, 9, 0, 0),
         provider_message_id="other-box",
         company="Other",
@@ -211,11 +211,11 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     assert extract.await_count == 0
     body = res.json()
     assert body["mailbox_id"] == mailbox_id
-    assert len(body["rejected"]) == 3
-    assert body["rejected"][0]["company"] == "acme"
-    assert body["rejected"][0]["role"] == "engineer"
-    assert body["rejected"][0]["received_at"].startswith("2026-08-20")
-    subjects = {item["subject"] for item in body["rejected"] if not item["company"]}
+    assert len(body["rejected_closed"]) == 3
+    assert body["rejected_closed"][0]["company"] == "acme"
+    assert body["rejected_closed"][0]["role"] == "engineer"
+    assert body["rejected_closed"][0]["received_at"].startswith("2026-08-20")
+    subjects = {item["subject"] for item in body["rejected_closed"] if not item["company"]}
     assert subjects == {"No company one", "No company two"}
     assert body["screening"] == [
         {
@@ -226,29 +226,29 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
         }
     ]
     assert body["screening"][0]["received_at"].startswith("2026-08-15")
-    assert body["interview"][0]["company"] == "Notion"
-    assert body["interview"][0]["role"] == "Product Engineer"
-    assert body["applied"] == [
+    assert body["interview_scheduled"][0]["company"] == "Notion"
+    assert body["interview_scheduled"][0]["role"] == "Product Engineer"
+    assert body["application_confirmation"] == [
         {
             "company": "Ignored Co",
             "role": "Ignored Role",
-            "received_at": body["applied"][0]["received_at"],
-            "subject": "applied mail",
+            "received_at": body["application_confirmation"][0]["received_at"],
+            "subject": "application_confirmation mail",
         }
     ]
-    assert body["applied"][0]["received_at"].startswith("2026-08-17")
-    assert all(item["company"] != "Ignored Co" for item in body["rejected"])
+    assert body["application_confirmation"][0]["received_at"].startswith("2026-08-17")
+    assert all(item["company"] != "Ignored Co" for item in body["rejected_closed"])
     assert all(item["company"] != "Ignored Co" for item in body["screening"])
-    assert all(item["company"] != "Ignored Co" for item in body["interview"])
-    assert all(item["company"] != "Old Co" for item in body["rejected"])
-    assert all(item["company"] != "Other" for item in body["interview"])
+    assert all(item["company"] != "Ignored Co" for item in body["interview_scheduled"])
+    assert all(item["company"] != "Old Co" for item in body["rejected_closed"])
+    assert all(item["company"] != "Other" for item in body["interview_scheduled"])
 
     page = client.get(
         f"/api/mailboxes/{mailbox_id}/outcomes",
         params={
             "date_from": "2026-08-01",
             "date_to": "2026-08-31",
-            "label": "rejected",
+            "label": "rejected_closed",
             "limit": 1,
             "offset": 0,
         },
@@ -256,10 +256,10 @@ def test_outcomes_reads_stored_rows_without_calling_openai():
     assert page.status_code == 200, page.text
     page_body = page.json()
     assert page_body["total"] == 3
-    assert page_body["label"] == "rejected"
+    assert page_body["label"] == "rejected_closed"
     assert len(page_body["items"]) == 1
     assert page_body["items"][0]["company"] == "acme"
-    assert page_body["rejected"] == []
+    assert page_body["rejected_closed"] == []
 
 
 def test_label_update_extracts_only_for_outcome_labels():
@@ -269,7 +269,7 @@ def test_label_update_extracts_only_for_outcome_labels():
     rejected_target = _add_email(
         db,
         box.id,
-        label=EmailLabel.APPLIED.value,
+        label=EmailLabel.APPLICATION_CONFIRMATION.value,
         received_at=datetime(2026, 8, 1, 12, 0, 0),
         provider_message_id="to-rejected",
         subject="Thanks for applying to Acme",
@@ -277,7 +277,7 @@ def test_label_update_extracts_only_for_outcome_labels():
     other_target = _add_email(
         db,
         box.id,
-        label=EmailLabel.OTHERS.value,
+        label=EmailLabel.OTHER.value,
         received_at=datetime(2026, 8, 2, 12, 0, 0),
         provider_message_id="to-alert",
         subject="Newsletter",
@@ -285,7 +285,7 @@ def test_label_update_extracts_only_for_outcome_labels():
     applied_target = _add_email(
         db,
         box.id,
-        label=EmailLabel.JOB_ALERT.value,
+        label=EmailLabel.RECRUITMENT_ALERT.value,
         received_at=datetime(2026, 8, 3, 12, 0, 0),
         provider_message_id="to-applied",
         subject="Thanks for applying to Stripe",
@@ -301,15 +301,15 @@ def test_label_update_extracts_only_for_outcome_labels():
     with patch("app.classify.outcome_extract.extract_company_role", extract):
         rejected = client.patch(
             f"/api/emails/{rejected_id}/label",
-            json={"label": "rejected", "save_training": False},
+            json={"label": "rejected_closed", "save_training": False},
         )
         other = client.patch(
             f"/api/emails/{other_id}/label",
-            json={"label": "job_alert", "save_training": False},
+            json={"label": "recruitment_alert", "save_training": False},
         )
         applied = client.patch(
             f"/api/emails/{applied_id}/label",
-            json={"label": "applied", "save_training": False},
+            json={"label": "application_confirmation", "save_training": False},
         )
 
     assert rejected.status_code == 200, rejected.text
@@ -323,20 +323,20 @@ def test_label_update_extracts_only_for_outcome_labels():
     assert stored.job_role == "Backend Engineer"
     assert stored.outcome_extracted is True
     applied_row = db.query(EmailMessage).filter(EmailMessage.id == applied_id).one()
-    assert applied_row.label == EmailLabel.APPLIED.value
+    assert applied_row.label == EmailLabel.APPLICATION_CONFIRMATION.value
     assert applied_row.company == "Acme"
     assert applied_row.job_role == "Backend Engineer"
     assert applied_row.outcome_extracted is True
     untouched = db.query(EmailMessage).filter(EmailMessage.id == other_id).one()
-    assert untouched.label == EmailLabel.JOB_ALERT.value
+    assert untouched.label == EmailLabel.RECRUITMENT_ALERT.value
     assert untouched.outcome_extracted is False
     assert untouched.company is None
     db.close()
 
 
 def test_new_applied_mail_extracts_company_and_role():
-    assert EmailLabel.APPLIED.value in OUTCOME_LABELS
-    assert EmailLabel.APPLIED.value not in BACKFILL_LABELS
+    assert EmailLabel.APPLICATION_CONFIRMATION.value in OUTCOME_LABELS
+    assert EmailLabel.APPLICATION_CONFIRMATION.value not in BACKFILL_LABELS
 
     SessionLocal = _session_factory()
     db = SessionLocal()
@@ -344,7 +344,7 @@ def test_new_applied_mail_extracts_company_and_role():
     email = _add_email(
         db,
         box.id,
-        label=EmailLabel.APPLIED.value,
+        label=EmailLabel.APPLICATION_CONFIRMATION.value,
         received_at=datetime(2026, 9, 1, 12, 0, 0),
         provider_message_id="new-applied",
         subject="Thanks for applying to Notion",

@@ -43,6 +43,27 @@ def list_training_examples(
     )
 
 
+@router.delete("/training/unused")
+def delete_unused_training_examples(db: Session = Depends(get_db)) -> dict[str, int]:
+    deleted = db.query(ClassifyCorrection).filter(
+        ClassifyCorrection.used_in_prompt_version_id.is_(None)
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"deleted": deleted}
+
+
+@router.delete("/training/{example_id}")
+def delete_training_example(example_id: int, db: Session = Depends(get_db)) -> dict[str, int]:
+    row = db.query(ClassifyCorrection).filter(ClassifyCorrection.id == example_id).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Training example not found")
+    if row.used_in_prompt_version_id is not None:
+        raise HTTPException(status_code=409, detail="Training example was already used in a prompt update")
+    db.delete(row)
+    db.commit()
+    return {"deleted": 1}
+
+
 @router.post("/prompt/update", response_model=ClassifyPromptUpdateOut)
 async def classify_prompt_update(db: Session = Depends(get_db)) -> ClassifyPromptUpdateOut:
     try:

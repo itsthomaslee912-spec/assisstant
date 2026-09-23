@@ -1,11 +1,13 @@
-import { CSSProperties, Dispatch, FormEvent, PointerEvent, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, Dispatch, FormEvent, KeyboardEvent, PointerEvent, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import EmailBody from "./components/EmailBody";
 import MessageRow from "./components/MessageRow";
 import SettingsPage, { type SettingsSection } from "./pages/SettingsPage";
 import {
+  checkAutoSyncNow,
   disconnectMailbox,
   eventsUrl,
+  fetchAutoSyncStatus,
   fetchClassifyPromptStatus,
   fetchEmailDetail,
   fetchEmails,
@@ -21,12 +23,14 @@ import {
   type EmailDetail,
   type EmailItem,
   type EmailLabel,
+  type InterviewSubtype,
   type EmailPage,
+  type AutoSyncStatus,
   type MailFolder,
   type Mailbox,
   type Provider,
 } from "./api";
-import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES, EMPTY_LABEL_COUNTS } from "./labels";
+import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES, EMPTY_LABEL_COUNTS, INTERVIEW_SUBTYPE_TITLES } from "./labels";
 import {
   applyFontFamily,
   applyFontSize,
@@ -38,7 +42,6 @@ import {
   saveFontSize,
   saveInboxType,
   saveViewMode,
-  VIEW_MODES,
   type FontFamily,
   type FontSize,
   type InboxType,
@@ -51,6 +54,7 @@ const LIST_OVERSCAN = 12;
 const LIST_ROW_GROUP_H = 40;
 const LIST_ROW_EMAIL_H = 102;
 const LIST_ROW_CARD_H = 148;
+const LIST_ROW_TABLE_H = 72;
 
 type ListRow =
   | { kind: "group"; key: string; heading: string; count: number }
@@ -190,6 +194,7 @@ function initialsFrom(text: string): string {
 
 function emailRowHeight(mode: ViewMode): number {
   if (mode === "card") return LIST_ROW_CARD_H;
+  if (mode === "table") return LIST_ROW_TABLE_H;
   return LIST_ROW_EMAIL_H;
 }
 
@@ -244,12 +249,14 @@ export default function App() {
   const [emails, setEmails] = useState<EmailItem[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(null);
   const [label, setLabel] = useState<"all" | EmailLabel>("all");
+  const [interviewSubtype, setInterviewSubtype] = useState<"all" | InterviewSubtype>("all");
   const [folder, setFolder] = useState<"all" | MailFolder>("all");
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const [filteredTotal, setFilteredTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [nextReceivedAt, setNextReceivedAt] = useState<string | null>(null);
   const [nextIsRead, setNextIsRead] = useState<boolean | null>(null);
@@ -258,19 +265,28 @@ export default function App() {
   const [mailboxUnreadCounts, setMailboxUnreadCounts] = useState<Record<number, number>>({});
   const [folderCounts, setFolderCounts] = useState<Record<MailFolder, number>>(EMPTY_FOLDER_COUNTS);
   const [error, setError] = useState<string | null>(null);
-  const [live, setLive] = useState(false);
+  const [autoSyncStatus, setAutoSyncStatus] = useState<AutoSyncStatus | null>(null);
+  const [autoSyncOffline, setAutoSyncOffline] = useState(false);
+  const [autoSyncChecking, setAutoSyncChecking] = useState(false);
+  const [autoSyncDetailsOpen, setAutoSyncDetailsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
 
   const [connectEmail, setConnectEmail] = useState("");
   const [connectProvider, setConnectProvider] = useState<Provider>("google");
   const [addAccountOpen, setAddAccountOpen] = useState(false);
   const [dialogStep, setDialogStep] = useState<"type" | "email">("type");
+
   const [syncingIds, setSyncingIds] = useState<Set<number>>(() => new Set());
   const [reclassifyingIds, setReclassifyingIds] = useState<Set<number>>(() => new Set());
+  const [reclassifyProgress, setReclassifyProgress] = useState<Record<number, { processed: number; total: number; failed: number }>>({});
   const [actionStatus, setActionStatus] = useState<{
     type: "sync" | "reclassify" | "success" | "error";
     message: string;
   } | null>(null);
+  const [mailboxActions, setMailboxActions] = useState<Record<number, {
+    type: "sync" | "reclassify" | "success" | "error";
+    message: string;
+  }>>({});
   const [saveTraining, setSaveTraining] = useState(false);
   const [savingLabel, setSavingLabel] = useState(false);
   const [unusedTraining, setUnusedTraining] = useState(0);
@@ -278,12 +294,14 @@ export default function App() {
   const [pendingLabel, setPendingLabel] = useState<{ emailId: number; nextLabel: EmailLabel } | null>(
     null
   );
+  const [pendingSubtype, setPendingSubtype] = useState<InterviewSubtype | "">("");
   const [markAllOpen, setMarkAllOpen] = useState(false);
   const [markingAllRead, setMarkingAllRead] = useState(false);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<EmailDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [tableDialogOpen, setTableDialogOpen] = useState(false);
   const [collapsedDates, setCollapsedDates] = useState<Set<string>>(new Set());
   const [accountsW, setAccountsW] = useState(() => loadStoredWidth(ACCOUNTS_W_KEY, 260, ACCOUNTS_MIN));
   const [listW, setListW] = useState(() => loadStoredWidth(LIST_W_KEY, 360, LIST_MIN));
@@ -299,6 +317,7 @@ export default function App() {
   const filterRef = useRef({
     mailboxId: selectedMailboxId,
     label,
+    interviewSubtype,
     folder,
     query: searchQuery,
     inboxType,
@@ -306,13 +325,17 @@ export default function App() {
   filterRef.current = {
     mailboxId: selectedMailboxId,
     label,
+    interviewSubtype,
     folder,
     query: searchQuery,
     inboxType,
   };
   const fetchGen = useRef(0);
+  const detailGen = useRef(0);
   const loadingMoreRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const readerDialogRef = useRef<HTMLElement>(null);
+  const readerCloseRef = useRef<HTMLButtonElement>(null);
   const didMountFilters = useRef(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -340,6 +363,11 @@ export default function App() {
     return name ? `${name} — ${message}` : message;
   }
 
+  function setMailboxAction(id: number | null | undefined, type: "sync" | "reclassify" | "success" | "error", message: string) {
+    if (id == null) return;
+    setMailboxActions((prev) => ({ ...prev, [id]: { type, message: withAccount(id, message) } }));
+  }
+
   function setIdInSet(
     setter: Dispatch<SetStateAction<Set<number>>>,
     id: number,
@@ -354,6 +382,7 @@ export default function App() {
   }
 
   const applyPageMeta = useCallback((page: EmailPage) => {
+    setFilteredTotal(page.total);
     setHasMore(page.has_more);
     setNextCursor(page.next_cursor);
     setNextReceivedAt(page.next_received_at ?? null);
@@ -369,6 +398,7 @@ export default function App() {
     const {
       mailboxId,
       label: currentLabel,
+      interviewSubtype: currentSubtype,
       folder: currentFolder,
       query,
       inboxType: currentInboxType,
@@ -378,6 +408,7 @@ export default function App() {
     loadingMoreRef.current = false;
     setError(null);
     setHasMore(false);
+    setFilteredTotal(0);
     setNextCursor(null);
     setNextReceivedAt(null);
     setNextIsRead(null);
@@ -385,6 +416,7 @@ export default function App() {
       const page = await fetchEmails({
         mailboxId,
         label: currentLabel,
+        interviewSubtype: currentSubtype === "all" ? null : currentSubtype,
         folder: currentFolder,
         query,
         inboxType: currentInboxType,
@@ -397,6 +429,7 @@ export default function App() {
       if (gen !== fetchGen.current) return;
       setError(err instanceof Error ? err.message : "Failed to load emails");
       setEmails([]);
+      setFilteredTotal(0);
     } finally {
       if (gen === fetchGen.current) setLoading(false);
     }
@@ -410,6 +443,7 @@ export default function App() {
     const {
       mailboxId,
       label: currentLabel,
+      interviewSubtype: currentSubtype,
       folder: currentFolder,
       query,
       inboxType: currentInboxType,
@@ -418,6 +452,7 @@ export default function App() {
       const page = await fetchEmails({
         mailboxId,
         label: currentLabel,
+        interviewSubtype: currentSubtype === "all" ? null : currentSubtype,
         folder: currentFolder,
         query,
         inboxType: currentInboxType,
@@ -494,6 +529,36 @@ export default function App() {
     void load();
   }, [load]);
 
+  const refreshAutoSyncStatus = useCallback(async () => {
+    try {
+      const status = await fetchAutoSyncStatus();
+      setAutoSyncStatus(status);
+      setAutoSyncOffline(false);
+    } catch {
+      setAutoSyncOffline(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAutoSyncStatus();
+    const timer = window.setInterval(() => void refreshAutoSyncStatus(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [refreshAutoSyncStatus]);
+
+  async function retryAutoSync() {
+    if (autoSyncChecking) return;
+    setAutoSyncChecking(true);
+    try {
+      const status = autoSyncOffline ? await fetchAutoSyncStatus() : await checkAutoSyncNow();
+      setAutoSyncStatus(status);
+      setAutoSyncOffline(false);
+    } catch {
+      setAutoSyncOffline(true);
+    } finally {
+      setAutoSyncChecking(false);
+    }
+  }
+
   useEffect(() => {
     if (!didMountFilters.current) {
       didMountFilters.current = true;
@@ -502,11 +567,13 @@ export default function App() {
     setEmails([]);
     scrollRef.current?.scrollTo(0, 0);
     void loadFirstPage();
-  }, [selectedMailboxId, label, folder, searchQuery, loadFirstPage]);
+  }, [selectedMailboxId, label, interviewSubtype, folder, searchQuery, loadFirstPage]);
 
   useEffect(() => {
     const source = new EventSource(eventsUrl());
-    source.addEventListener("connected", () => setLive(true));
+    source.addEventListener("connected", () => {
+      void load();
+    });
     source.addEventListener("mailbox.disconnected", (evt) => {
       try {
         const data = JSON.parse((evt as MessageEvent).data) as { mailbox_id?: number };
@@ -526,9 +593,10 @@ export default function App() {
           previous_label?: EmailLabel;
           updated?: boolean;
         };
-        const { mailboxId, label: currentLabel, folder: currentFolder, query } = filterRef.current;
+        const { mailboxId, label: currentLabel, interviewSubtype: currentSubtype, folder: currentFolder, query } = filterRef.current;
         const matchesMailbox = mailboxId == null || item.mailbox_id === mailboxId;
         const matchesLabel = currentLabel === "all" || item.label === currentLabel;
+        const matchesSubtype = currentSubtype === "all" || item.interview_subtype === currentSubtype;
         const itemFolder = mailFolderOf(item);
         const matchesFolder = currentFolder === "all" || itemFolder === currentFolder;
         const needle = query.trim().toLowerCase();
@@ -541,7 +609,7 @@ export default function App() {
           const inbox = filterRef.current.inboxType;
           const existingIdx = prev.findIndex((e) => e.id === item.id);
           if (existingIdx >= 0) {
-            if (matchesMailbox && matchesLabel && matchesFolder && matchesQuery) {
+            if (matchesMailbox && matchesLabel && matchesSubtype && matchesFolder && matchesQuery) {
               const next = [...prev];
               next[existingIdx] = {
                 ...next[existingIdx],
@@ -552,7 +620,7 @@ export default function App() {
             }
             return prev.filter((e) => e.id !== item.id);
           }
-          if (!isUpdate && matchesMailbox && matchesLabel && matchesFolder && matchesQuery) {
+          if (!isUpdate && matchesMailbox && matchesLabel && matchesSubtype && matchesFolder && matchesQuery) {
             return sortEmailsForInbox([{ ...item, is_read: Boolean(item.is_read) }, ...prev], inbox);
           }
           return prev;
@@ -560,7 +628,7 @@ export default function App() {
 
         setSelected((prev) =>
           prev && prev.id === item.id
-            ? { ...prev, label: item.label, confidence: item.confidence }
+            ? { ...prev, label: item.label, interview_subtype: item.interview_subtype, confidence: item.confidence }
             : prev,
         );
 
@@ -616,13 +684,7 @@ export default function App() {
         }
         const imported = data.imported ?? 0;
         const total = data.total ?? 0;
-        setActionStatus({
-          type: "sync",
-          message: withAccount(
-            data.mailbox_id,
-            data.message || `Syncing… ${imported}${total ? ` / ${total}` : ""}`,
-          ),
-        });
+        setMailboxAction(data.mailbox_id, "sync", data.message || `Syncing… ${imported}${total ? ` / ${total}` : ""}`);
       } catch {
         /* ignore */
       }
@@ -633,6 +695,8 @@ export default function App() {
           mailbox_id?: number;
           message?: string;
           updated?: number;
+          processed?: number;
+          failed?: number;
           total?: number;
         };
         if (data.mailbox_id != null) {
@@ -640,14 +704,13 @@ export default function App() {
           reclassifyingIdsRef.current = new Set(reclassifyingIdsRef.current).add(data.mailbox_id);
         }
         const updated = data.updated ?? 0;
+        if (data.mailbox_id != null) {
+          setReclassifyProgress((prev) => ({ ...prev, [data.mailbox_id!]: {
+            processed: data.processed ?? 0, total: data.total ?? 0, failed: data.failed ?? 0,
+          }}));
+        }
         const total = data.total ?? 0;
-        setActionStatus({
-          type: "reclassify",
-          message: withAccount(
-            data.mailbox_id,
-            data.message || `Reclassifying… ${updated}${total ? ` / ${total}` : ""}`,
-          ),
-        });
+        setMailboxAction(data.mailbox_id, "reclassify", data.message || `Reclassifying… ${updated}${total ? ` / ${total}` : ""}`);
       } catch {
         /* ignore */
       }
@@ -659,20 +722,24 @@ export default function App() {
           state?: string;
           message?: string;
           updated?: number;
+          processed?: number;
+          failed?: number;
           total?: number;
         };
         const mailboxId = data.mailbox_id;
         if (mailboxId != null) {
+          setReclassifyProgress((prev) => ({ ...prev, [mailboxId]: {
+            processed: data.processed ?? data.total ?? 0, total: data.total ?? 0, failed: data.failed ?? 0,
+          }}));
           const next = new Set(reclassifyingIdsRef.current);
           next.delete(mailboxId);
           reclassifyingIdsRef.current = next;
           setReclassifyingIds(next);
         }
         void load();
-        const othersRemain =
-          syncingIdsRef.current.size > 0 || reclassifyingIdsRef.current.size > 0;
-        const msg = withAccount(
+        setMailboxAction(
           mailboxId,
+          data.state === "error" ? "error" : "success",
           data.message ||
             (data.state === "error"
               ? "Reclassify failed"
@@ -680,17 +747,6 @@ export default function App() {
                 ? "Reclassify stopped"
                 : `Reclassify complete${data.updated != null ? ` — ${data.updated} updated` : ""}`),
         );
-        if (data.state === "error") {
-          setActionStatus({ type: "error", message: msg });
-        } else if (othersRemain) {
-          /* Keep remaining row spinner; don't claim the whole app finished. */
-        } else if (data.state === "stopped") {
-          setActionStatus({ type: "success", message: msg });
-          window.setTimeout(() => setActionStatus(null), 4000);
-        } else {
-          setActionStatus({ type: "success", message: msg });
-          window.setTimeout(() => setActionStatus(null), 4000);
-        }
       } catch {
         void load();
       }
@@ -711,10 +767,9 @@ export default function App() {
           setSyncingIds(next);
         }
         void load();
-        const othersRemain =
-          syncingIdsRef.current.size > 0 || reclassifyingIdsRef.current.size > 0;
-        const msg = withAccount(
+        setMailboxAction(
           mailboxId,
+          data.state === "error" ? "error" : "success",
           data.message ||
             (data.state === "error"
               ? "Sync failed"
@@ -722,22 +777,10 @@ export default function App() {
                 ? "Sync stopped"
                 : `Sync complete${data.imported != null ? ` — ${data.imported} new` : ""}`),
         );
-        if (data.state === "error") {
-          setActionStatus({ type: "error", message: msg });
-        } else if (othersRemain) {
-          /* Keep remaining row spinner; don't claim the whole app finished. */
-        } else if (data.state === "stopped") {
-          setActionStatus({ type: "success", message: msg });
-          window.setTimeout(() => setActionStatus(null), 4000);
-        } else {
-          setActionStatus({ type: "success", message: msg });
-          window.setTimeout(() => setActionStatus(null), 4000);
-        }
       } catch {
         void load();
       }
     });
-    source.onerror = () => setLive(false);
     return () => source.close();
   }, [load]);
 
@@ -809,6 +852,7 @@ export default function App() {
   }
 
   function chooseViewMode(next: ViewMode) {
+    setTableDialogOpen(false);
     setViewMode(next);
     saveViewMode(next);
   }
@@ -955,13 +999,6 @@ export default function App() {
     });
   }
 
-  function openAddAccount() {
-    setConnectEmail("");
-    setConnectProvider("google");
-    setDialogStep("type");
-    setAddAccountOpen(true);
-  }
-
   function closeAddAccount() {
     setAddAccountOpen(false);
     setDialogStep("type");
@@ -988,18 +1025,22 @@ export default function App() {
       setBanner("Enter a valid email address.");
       return;
     }
-    const guessed = guessProviderFromEmail(email);
-    const provider = guessed ?? connectProvider;
+    const provider = guessProviderFromEmail(email) ?? connectProvider;
     window.location.href = oauthStartUrl(provider, { email });
   }
 
-  function onConnectEmailSubmit(e: FormEvent) {
-    e.preventDefault();
+  function onConnectEmailSubmit(event: FormEvent) {
+    event.preventDefault();
     connectWithEmail();
   }
 
   async function onDisconnect(id: number) {
     await disconnectMailbox(id);
+    setMailboxActions((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     if (selected?.mailbox_id === id) {
       setSelected(null);
       setSelectedId(null);
@@ -1008,20 +1049,19 @@ export default function App() {
     await load();
   }
 
-  async function onSync(id: number) {
-    const name = accountName(id) || "mailbox";
+  async function onSync(id: number, selectAccount = true) {
+    if (selectAccount) selectMailbox(id);
     setIdInSet(setSyncingIds, id, true);
     syncingIdsRef.current = new Set(syncingIdsRef.current).add(id);
-    setActionStatus({ type: "sync", message: withAccount(id, "Syncing… listing Inbox") });
+    setMailboxAction(id, "sync", "Starting full rescan...");
     try {
       const started = await syncMailbox(id);
-      setActionStatus({
-        type: "sync",
-        message: withAccount(id, started.message || `Syncing ${name} in the background…`),
-      });
+      if (syncingIdsRef.current.has(id)) {
+        setMailboxAction(id, "sync", started.message || "Syncing in the background…");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Sync failed";
-      setActionStatus({ type: "error", message: withAccount(id, msg) });
+      setMailboxAction(id, "error", msg);
       setIdInSet(setSyncingIds, id, false);
       const next = new Set(syncingIdsRef.current);
       next.delete(id);
@@ -1029,36 +1069,30 @@ export default function App() {
     }
   }
 
-  async function onStopSync(id: number) {
+  async function onStopSync(id: number, selectAccount = true) {
+    if (selectAccount) selectMailbox(id);
     try {
       const stopped = await stopSyncMailbox(id);
-      setActionStatus({
-        type: "sync",
-        message: withAccount(id, stopped.message || "Stopping sync…"),
-      });
+      setMailboxAction(id, "sync", stopped.message || "Stopping sync…");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to stop sync";
-      setActionStatus({ type: "error", message: withAccount(id, msg) });
+      setMailboxAction(id, "error", msg);
     }
   }
 
-  async function onReclassify(id: number) {
-    const name = accountName(id) || "mailbox";
+  async function onReclassify(id: number, selectAccount = true) {
+    if (selectAccount) selectMailbox(id);
     setIdInSet(setReclassifyingIds, id, true);
     reclassifyingIdsRef.current = new Set(reclassifyingIdsRef.current).add(id);
-    setActionStatus({
-      type: "reclassify",
-      message: withAccount(id, "Reclassifying… running AI labels"),
-    });
+    setMailboxAction(id, "reclassify", "Reclassifying… running AI labels");
     try {
       const started = await reclassifyMailbox(id);
-      setActionStatus({
-        type: "reclassify",
-        message: withAccount(id, started.message || `Reclassifying ${name} in the background…`),
-      });
+      if (reclassifyingIdsRef.current.has(id)) {
+        setMailboxAction(id, "reclassify", started.message || "Reclassifying in the background…");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Reclassify failed";
-      setActionStatus({ type: "error", message: withAccount(id, msg) });
+      setMailboxAction(id, "error", msg);
       setIdInSet(setReclassifyingIds, id, false);
       const next = new Set(reclassifyingIdsRef.current);
       next.delete(id);
@@ -1066,49 +1100,54 @@ export default function App() {
     }
   }
 
-  async function onStopReclassify(id: number) {
+  async function onStopReclassify(id: number, selectAccount = true) {
+    if (selectAccount) selectMailbox(id);
     try {
       const stopped = await stopReclassifyMailbox(id);
-      setActionStatus({
-        type: "reclassify",
-        message: withAccount(id, stopped.message || "Stopping reclassify…"),
-      });
+      setMailboxAction(id, "reclassify", stopped.message || "Stopping reclassify…");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to stop reclassify";
-      setActionStatus({ type: "error", message: withAccount(id, msg) });
+      setMailboxAction(id, "error", msg);
     }
   }
 
   function onChangeCategory(nextLabel: EmailLabel) {
     if (!selected || savingLabel || pendingLabel || selected.label === nextLabel) return;
+    setPendingSubtype("");
     setPendingLabel({ emailId: selected.id, nextLabel });
   }
 
   async function applyCategoryChange(useTraining: boolean) {
     if (!selected || !pendingLabel || savingLabel) return;
+    if (pendingLabel.nextLabel === "interview_scheduled" && !pendingSubtype) return;
     const emailId = pendingLabel.emailId;
     const nextLabel = pendingLabel.nextLabel;
+    const subtype = nextLabel === "interview_scheduled" ? pendingSubtype as InterviewSubtype : undefined;
     const previous = selected.label;
+    const previousSubtype = selected.interview_subtype;
     setPendingLabel(null);
     setSaveTraining(useTraining);
     setSavingLabel(true);
-    setSelected((prev) => (prev && prev.id === emailId ? { ...prev, label: nextLabel } : prev));
+    setSelected((prev) => (prev && prev.id === emailId ? { ...prev, label: nextLabel, interview_subtype: subtype ?? null } : prev));
     setEmails((prev) => {
       const currentLabel = filterRef.current.label;
-      if (currentLabel !== "all" && currentLabel !== nextLabel) {
+      const currentSubtype = filterRef.current.interviewSubtype;
+      if ((currentLabel !== "all" && currentLabel !== nextLabel)
+        || (currentSubtype !== "all" && currentSubtype !== subtype)) {
         return prev.filter((item) => item.id !== emailId);
       }
-      return prev.map((item) => (item.id === emailId ? { ...item, label: nextLabel } : item));
+      return prev.map((item) => (item.id === emailId ? { ...item, label: nextLabel, interview_subtype: subtype ?? null } : item));
     });
     try {
-      const updated = await updateEmailLabel(emailId, nextLabel, useTraining);
+      const updated = await updateEmailLabel(emailId, nextLabel, useTraining, subtype);
       setSelected((prev) => (prev && prev.id === emailId ? { ...prev, ...updated } : prev));
+      setEmails((prev) => prev.map((item) => item.id === emailId ? { ...item, ...updated } : item));
       if (useTraining) {
         setUnusedTraining((count) => count + 1);
         void refreshPromptStatus();
       }
     } catch (err) {
-      setSelected((prev) => (prev && prev.id === emailId ? { ...prev, label: previous } : prev));
+      setSelected((prev) => (prev && prev.id === emailId ? { ...prev, label: previous, interview_subtype: previousSubtype } : prev));
       setEmails((prev) =>
         prev.map((item) => (item.id === emailId ? { ...item, label: previous } : item))
       );
@@ -1138,12 +1177,15 @@ export default function App() {
   }
 
   async function onOpenEmail(id: number) {
+    const request = ++detailGen.current;
     setSelectedId(id);
+    setSelected(null);
     setSaveTraining(false);
     setPendingLabel(null);
     setLoadingDetail(true);
     try {
       const detail = await fetchEmailDetail(id);
+      if (request !== detailGen.current) return;
       setSelected(detail);
       setEmails((prev) => {
         const opened = prev.find((item) => item.id === id);
@@ -1163,10 +1205,94 @@ export default function App() {
         );
       });
     } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Could not open email");
+      if (request === detailGen.current) {
+        setBanner(err instanceof Error ? err.message : "Could not open email");
+        if (viewMode === "table") setTableDialogOpen(false);
+      }
     } finally {
-      setLoadingDetail(false);
+      if (request === detailGen.current) setLoadingDetail(false);
     }
+  }
+
+  function selectTableEmail(id: number) {
+    if (id === selectedId) return;
+    ++detailGen.current;
+    setSelectedId(id);
+    setSelected(null);
+    setLoadingDetail(false);
+  }
+
+  function openTableEmail(id: number) {
+    setTableDialogOpen(true);
+    void onOpenEmail(id);
+  }
+
+  function closeTableDialog() {
+    ++detailGen.current;
+    setTableDialogOpen(false);
+    setLoadingDetail(false);
+  }
+
+  useEffect(() => {
+    if (!tableDialogOpen) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    readerCloseRef.current?.focus();
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (document.querySelector(".dialog-backdrop")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTableDialog();
+      } else if (event.key === "Tab") {
+        const focusable = Array.from(readerDialogRef.current?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), select:not(:disabled), input:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])",
+        ) ?? []);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!readerDialogRef.current?.contains(document.activeElement)) {
+          event.preventDefault();
+          first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [tableDialogOpen]);
+
+  function onMessageListKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (viewMode === "table" && event.key === "Enter" && event.target === event.currentTarget && selectedId != null) {
+      event.preventDefault();
+      openTableEmail(selectedId);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, select, [contenteditable='true']")) return;
+    const emailRows = listRows
+      .map((row, index) => row.kind === "email" ? { id: row.email.id, index } : null)
+      .filter((row): row is { id: number; index: number } => row !== null);
+    if (!emailRows.length) return;
+
+    event.preventDefault();
+    const current = emailRows.findIndex((row) => row.id === selectedId);
+    const next = current < 0
+      ? event.key === "ArrowDown" ? 0 : emailRows.length - 1
+      : Math.max(0, Math.min(emailRows.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
+    const row = emailRows[next];
+    event.currentTarget.focus();
+    if (row.id === selectedId) return;
+    listVirtualizer.scrollToIndex(row.index, { align: "auto" });
+    if (viewMode === "table") selectTableEmail(row.id);
+    else void onOpenEmail(row.id);
   }
 
   function selectMailbox(id: number | null) {
@@ -1181,12 +1307,22 @@ export default function App() {
 
   function selectLabel(next: "all" | EmailLabel) {
     scrollRef.current?.scrollTo(0, 0);
+    if (interviewSubtype !== "all") {
+      setInterviewSubtype("all");
+      if (label === next) return;
+    }
     if (label === next) {
       setEmails([]);
       void loadFirstPage();
       return;
     }
     setLabel(next);
+  }
+
+  function selectInterviewSubtype(next: "all" | InterviewSubtype) {
+    if (interviewSubtype === next) return;
+    scrollRef.current?.scrollTo(0, 0);
+    setInterviewSubtype(next);
   }
 
   function selectFolder(next: "all" | MailFolder) {
@@ -1200,6 +1336,9 @@ export default function App() {
   }
 
   const selectedMailbox = selectedMailboxId != null ? mailboxById.get(selectedMailboxId) : null;
+  const actionMailboxIds = selectedMailbox ? [selectedMailbox.id] : mailboxes.map((mailbox) => mailbox.id);
+  const scopeSyncing = actionMailboxIds.some((id) => syncingIds.has(id));
+  const scopeReclassifying = actionMailboxIds.some((id) => reclassifyingIds.has(id));
   const scopeUnread = useMemo(() => {
     if (selectedMailboxId == null) {
       return Object.values(mailboxUnreadCounts).reduce((sum, n) => sum + n, 0);
@@ -1240,11 +1379,68 @@ export default function App() {
   }
   const readerAccount =
     selected != null ? mailboxById.get(selected.mailbox_id)?.email_address ?? "" : "";
+  const autoSyncState = autoSyncOffline ? "offline" : autoSyncStatus?.state ?? "checking";
+  const autoSyncAlert = ["offline", "no_account", "stopped", "error"].includes(autoSyncState);
+  const syncIntervalMinutes = Math.round((autoSyncStatus?.interval_seconds ?? 120) / 60);
+  const autoSyncLabel = autoSyncState === "active"
+    ? autoSyncStatus && autoSyncStatus.webhook_accounts === autoSyncStatus.connected_accounts
+      ? "Webhook sync on"
+      : autoSyncStatus?.webhook_accounts
+        ? `Webhook + auto sync · every ${syncIntervalMinutes} min`
+        : `Auto sync on · every ${syncIntervalMinutes} min`
+    : autoSyncState === "syncing"
+      ? "Auto sync running"
+      : autoSyncState === "checking"
+        ? "Checking auto sync…"
+        : "Auto sync off";
+  const autoSyncReason = autoSyncState === "no_account"
+    ? "Connect an email account to start automatic syncing."
+    : autoSyncState === "offline"
+      ? "The app cannot reach the email checker server. Start the server, then check again."
+      : autoSyncState === "stopped"
+        ? "The automatic sync worker is not running. Restart the email checker server, then check again."
+        : autoSyncStatus?.problem_mailboxes[0]
+          ? `${autoSyncStatus.problem_mailboxes[0].email_address}: ${autoSyncStatus.problem_mailboxes[0].message}`
+          : autoSyncStatus?.last_error ?? "An account could not sync. Check the connection and try again.";
+
+  if (settingsOpen) {
+    return (
+      <SettingsPage
+        section={settingsSection}
+        onSectionChange={setSettingsSection}
+        onClose={() => setSettingsOpen(false)}
+        themePref={themePref}
+        onThemeChange={chooseTheme}
+        viewMode={viewMode}
+        onViewModeChange={chooseViewMode}
+        inboxType={inboxType}
+        onInboxTypeChange={chooseInboxType}
+        fontFamily={fontFamily}
+        onFontFamilyChange={chooseFontFamily}
+        fontSize={fontSize}
+        onFontSizeChange={chooseFontSize}
+        mailboxes={mailboxes}
+        unusedTraining={unusedTraining}
+        updatingPrompt={updatingPrompt}
+        onUpdatePrompt={onUpdatePrompt}
+        onTrainingDeleted={refreshPromptStatus}
+        onAddAccount={() => {
+          setSettingsOpen(false);
+          setConnectEmail("");
+          setConnectProvider("google");
+          setDialogStep("type");
+          setAddAccountOpen(true);
+        }}
+        onRemoveAccount={onDisconnect}
+        initialMailboxId={selectedMailboxId}
+      />
+    );
+  }
 
   return (
     <div
       ref={shellRef}
-      className={resizing ? "app-shell is-resizing" : "app-shell"}
+      className={`app-shell view-${viewMode}${viewMode === "table" && tableDialogOpen ? " table-dialog-open" : ""}${resizing ? " is-resizing" : ""}`}
       style={
         {
           "--accounts-w": `${accountsW}px`,
@@ -1255,10 +1451,40 @@ export default function App() {
       <aside className="pane-accounts">
         <div className="accounts-top">
           <div className="brand-mini">Auto AI Email Checker</div>
-            <div className="accounts-top-actions">
-            <div className="live-mini" data-live={live}>
-              <span className="dot" />
-              {live ? "Live" : "…"}
+          <div className="accounts-top-actions">
+            <div className="auto-sync-header-wrap auto-sync-top-wrap">
+              <div className="auto-sync-mini" data-state={autoSyncState}>
+                <button
+                  type="button"
+                  className="auto-sync-status-button"
+                  aria-label={`Email sync status: ${autoSyncLabel}. Show details`}
+                  aria-expanded={autoSyncDetailsOpen}
+                  aria-controls="auto-sync-details"
+                  onClick={() => setAutoSyncDetailsOpen((open) => !open)}
+                >
+                  <span className="auto-sync-status-icon" aria-hidden="true">
+                    {autoSyncAlert ? "!" : autoSyncState === "active" ? "✓" : "↻"}
+                  </span>
+                  <span role="status" aria-live="polite">{autoSyncLabel}</span>
+                </button>
+              </div>
+              {autoSyncDetailsOpen && autoSyncAlert && (
+                <div id="auto-sync-details" className="auto-sync-details auto-sync-header-details">
+                  <p>{autoSyncReason}</p>
+                  {autoSyncState === "error" && autoSyncStatus && autoSyncStatus.problem_mailboxes.length > 1 && (
+                    <p>{autoSyncStatus.problem_mailboxes.length} accounts need attention.</p>
+                  )}
+                  <div className="auto-sync-actions">
+                    {autoSyncState === "no_account" ? (
+                      <button type="button" className="action-btn" onClick={() => openSettings("accounts")}>Accounts</button>
+                    ) : (
+                      <button type="button" className="action-btn" disabled={autoSyncChecking} onClick={() => void retryAutoSync()}>
+                        {autoSyncChecking ? "Checking…" : autoSyncState === "error" ? "Retry sync" : "Check again"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             <button
               type="button"
@@ -1271,7 +1497,6 @@ export default function App() {
             </button>
           </div>
         </div>
-
         <button
           type="button"
           className={selectedMailboxId == null ? "nav-inbox active" : "nav-inbox"}
@@ -1284,25 +1509,9 @@ export default function App() {
           <span className="nav-count">{inboxCount}</span>
         </button>
 
-        <div className="prompt-train">
-          <button
-            type="button"
-            className="action-btn"
-            onClick={() => openSettings("training")}
-          >
-            {unusedTraining > 0 ? `Training (${unusedTraining})` : "Training"}
-          </button>
-          <p className="prompt-train-hint">
-            {unusedTraining > 0
-              ? `${unusedTraining} training example${unusedTraining === 1 ? "" : "s"} ready`
-              : "Correct a category and save it as training data first"}
-          </p>
-        </div>
-
         <div className="accounts-label">Accounts</div>
         <div className="accounts-scroll">
           {mailboxes.map((box) => {
-            const count = mailboxCounts[box.id] ?? 0;
             const unread = mailboxUnreadCounts[box.id] ?? 0;
             return (
               <div key={box.id} className="account-row-wrap">
@@ -1319,79 +1528,52 @@ export default function App() {
                   </span>
                   <span className="account-main">
                     <span className="account-email">{box.email_address}</span>
-                    {unread > 0 ? (
-                      <span className="account-new-badge" title={`${unread} new messages`}>
-                        NEW {unread}
-                      </span>
-                    ) : (
-                      <span className="account-total">{count}</span>
-                    )}
                   </span>
+                  {unread > 0 && (
+                    <span className="account-new-badge" title={`${unread} new messages`}>
+                      {unread}
+                    </span>
+                  )}
                 </button>
-                <div className="account-row-actions">
-                  <button
-                    type="button"
-                    className={syncingIds.has(box.id) ? "action-btn busy" : "action-btn"}
-                    disabled={reclassifyingIds.has(box.id)}
-                    onClick={() => void (syncingIds.has(box.id) ? onStopSync(box.id) : onSync(box.id))}
-                  >
-                    {syncingIds.has(box.id) ? (
-                      <>
-                        <span className="spinner" aria-hidden="true" />
-                        Stop sync
-                      </>
-                    ) : (
-                      "Sync"
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className={reclassifyingIds.has(box.id) ? "action-btn busy" : "action-btn"}
-                    disabled={syncingIds.has(box.id)}
-                    onClick={() =>
-                      void (reclassifyingIds.has(box.id) ? onStopReclassify(box.id) : onReclassify(box.id))
-                    }
-                  >
-                    {reclassifyingIds.has(box.id) ? (
-                      <>
-                        <span className="spinner" aria-hidden="true" />
-                        Stop reclassify
-                      </>
-                    ) : (
-                      "Reclassify"
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className="action-btn danger"
-                    disabled={syncingIds.has(box.id) || reclassifyingIds.has(box.id)}
-                    onClick={() => void onDisconnect(box.id)}
-                  >
-                    Remove
-                  </button>
-                </div>
-                {(syncingIds.has(box.id) || reclassifyingIds.has(box.id)) && (
-                  <div className="account-progress" role="status">
-                    <span className="spinner" aria-hidden="true" />
-                    {syncingIds.has(box.id)
-                      ? "Sync in progress — click Stop sync to cancel"
-                      : "Reclassify in progress — click Stop reclassify to cancel"}
-                  </div>
-                )}
               </div>
             );
           })}
-          {!mailboxes.length && <p className="hint">No accounts yet</p>}
+          {!mailboxes.length && <p className="hint">Add an account to start automatic sync.</p>}
         </div>
 
-        <button type="button" className="add-account-btn" onClick={openAddAccount}>
-          + Add an account
-        </button>
+        <div className="account-filter-panel" aria-label="Email filters">
+          <div className="account-filter-section">
+            <span className="account-filter-title">Folders</span>
+            <div className="folder-badges account-filter-list" role="tablist" aria-label="Mail folders">
+              <button type="button" className={folder === "all" ? "folder-badge active" : "folder-badge"} onClick={() => selectFolder("all")}>
+                <span>All mail</span><span className="count-pill">{allCount}</span>
+              </button>
+              {MAIL_FOLDERS.map((item) => (
+                <button key={item} type="button" className={folder === item ? `folder-badge active folder-${item}` : `folder-badge folder-${item}`} onClick={() => selectFolder(item)}>
+                  <span>{MAIL_FOLDER_TITLES[item]}</span><span className="count-pill">{folderCounts[item]}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="account-filter-section">
+            <span className="account-filter-title">Categories</span>
+            <div className="classify-badges account-filter-list" role="tablist" aria-label="Classifications">
+              <button type="button" className={label === "all" ? "classify-badge active" : "classify-badge"} onClick={() => selectLabel("all")}>
+                <span>All categories</span><span className="count-pill">{allCount}</span>
+              </button>
+              {CLASSIFY_LABELS.map((item) => (
+                <button key={item} type="button" className={label === item ? `classify-badge active label-${item}` : `classify-badge label-${item}`} onClick={() => selectLabel(item)}>
+                  <span>{CLASSIFY_LABEL_TITLES[item]}</span><span className="count-pill">{labelCounts[item]}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       </aside>
 
       <button
         type="button"
-        className="pane-splitter"
+        className="pane-splitter accounts-splitter"
         aria-label="Resize accounts pane"
         onPointerDown={onSplitterPointerDown("accounts")}
         onPointerMove={onSplitterPointerMove}
@@ -1402,32 +1584,50 @@ export default function App() {
       <section className={`pane-list view-${viewMode}`}>
         <header className="list-header">
           <div className="list-title">
-            <div className="view-toggle" role="radiogroup" aria-label="Inbox view">
-              {VIEW_MODES.map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  role="radio"
-                  aria-checked={viewMode === mode}
-                  className={viewMode === mode ? "view-chip active" : "view-chip"}
-                  onClick={() => chooseViewMode(mode)}
-                >
-                  {mode === "list" ? "List" : "Card"}
-                </button>
-              ))}
-            </div>
             <div className="list-title-row">
               <h2>
                 {selectedMailbox ? selectedMailbox.email_address : "All accounts"}
               </h2>
-              <button
-                type="button"
-                className="action-btn"
-                disabled={scopeUnread === 0 || markingAllRead}
-                onClick={() => setMarkAllOpen(true)}
-              >
-                Mark all as read
-              </button>
+              <div className="list-header-actions">
+                <button
+                  type="button"
+                  className={scopeSyncing ? "action-btn busy" : "action-btn"}
+                  disabled={!actionMailboxIds.length || scopeReclassifying}
+                  title={selectedMailbox ? "Scan this account and download missing messages" : "Scan all connected accounts"}
+                  onClick={() => {
+                    if (scopeSyncing) {
+                      actionMailboxIds.filter((id) => syncingIds.has(id)).forEach((id) => void onStopSync(id, false));
+                    } else {
+                      actionMailboxIds.forEach((id) => void onSync(id, false));
+                    }
+                  }}
+                >
+                  {scopeSyncing ? "Stop sync" : selectedMailbox ? "Sync" : "Sync all"}
+                </button>
+                <button
+                  type="button"
+                  className={scopeReclassifying ? "action-btn busy" : "action-btn"}
+                  disabled={!actionMailboxIds.length || scopeSyncing}
+                  title={selectedMailbox ? "Classify this account using the selected AI model" : "Classify all connected accounts"}
+                  onClick={() => {
+                    if (scopeReclassifying) {
+                      actionMailboxIds.filter((id) => reclassifyingIds.has(id)).forEach((id) => void onStopReclassify(id, false));
+                    } else {
+                      actionMailboxIds.forEach((id) => void onReclassify(id, false));
+                    }
+                  }}
+                >
+                  {scopeReclassifying ? "Stop reclassify" : selectedMailbox ? "Reclassify" : "Reclassify all"}
+                </button>
+                <button
+                  type="button"
+                  className="action-btn"
+                  disabled={scopeUnread === 0 || markingAllRead}
+                  onClick={() => setMarkAllOpen(true)}
+                >
+                  Mark all as read
+                </button>
+              </div>
             </div>
           </div>
           <form
@@ -1459,53 +1659,25 @@ export default function App() {
               </button>
             ) : null}
           </form>
-          <div className="folder-badges" role="tablist" aria-label="Mail folders">
-            <button
-              type="button"
-              className={folder === "all" ? "folder-badge active" : "folder-badge"}
-              onClick={() => selectFolder("all")}
-            >
-              all
-              <span className="count-pill">{allCount}</span>
-            </button>
-            {MAIL_FOLDERS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={
-                  folder === item ? `folder-badge active folder-${item}` : `folder-badge folder-${item}`
-                }
-                onClick={() => selectFolder(item)}
-              >
-                {MAIL_FOLDER_TITLES[item]}
-                <span className="count-pill">{folderCounts[item]}</span>
-              </button>
-            ))}
-          </div>
-          <div className="classify-badges" role="tablist" aria-label="Classifications">
-            <button
-              type="button"
-              className={label === "all" ? "classify-badge active" : "classify-badge"}
-              onClick={() => selectLabel("all")}
-            >
-              all
-              <span className="count-pill">{allCount}</span>
-            </button>
-            {CLASSIFY_LABELS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={
-                  label === item ? `classify-badge active label-${item}` : `classify-badge label-${item}`
-                }
-                onClick={() => selectLabel(item)}
-              >
-                {CLASSIFY_LABEL_TITLES[item]}
-                <span className="count-pill">{labelCounts[item]}</span>
-              </button>
-            ))}
-          </div>
         </header>
+
+        {label === "interview_scheduled" && (
+          <div className="subtype-filter" role="group" aria-label="Interview Scheduled subtype">
+            <label className="subtype-filter-label" htmlFor="interview-subtype-filter">Interview subtype</label>
+            <select
+              id="interview-subtype-filter"
+              className="subtype-filter-select"
+              value={interviewSubtype}
+              onChange={(event) => selectInterviewSubtype(event.target.value as "all" | InterviewSubtype)}
+            >
+              <option value="all">All subtypes</option>
+              {(Object.entries(INTERVIEW_SUBTYPE_TITLES) as [InterviewSubtype, string][]).map(([value, title]) => (
+                <option key={value} value={value}>{title}</option>
+              ))}
+            </select>
+            {!loading && <span className="subtype-filter-count" role="status">{filteredTotal} email{filteredTotal === 1 ? "" : "s"}</span>}
+          </div>
+        )}
 
         {actionStatus && (
           <div className={`action-toast ${actionStatus.type}`} role="status">
@@ -1521,6 +1693,33 @@ export default function App() {
           </div>
         )}
 
+        {mailboxes
+          .filter((box) => selectedMailboxId == null || box.id === selectedMailboxId)
+          .map((box) => {
+            const status = mailboxActions[box.id];
+            if (!status) return null;
+            return (
+              <div key={box.id} className={`action-toast ${status.type}`} role="status">
+                {(status.type === "sync" || status.type === "reclassify") && (
+                  <span className="spinner" aria-hidden="true" />
+                )}
+                <span>{status.message}</span>
+                {(status.type === "success" || status.type === "error") && (
+                  <button
+                    type="button"
+                    onClick={() => setMailboxActions((prev) => {
+                      const next = { ...prev };
+                      delete next[box.id];
+                      return next;
+                    })}
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
         {banner && (
           <div className="banner inline" role="status">
             <span>{banner}</span>
@@ -1532,7 +1731,44 @@ export default function App() {
         {loading && <p className="hint pad">Loading…</p>}
         {error && <p className="error pad">{error}</p>}
 
-        <div className={`message-scroll view-${viewMode}`} ref={scrollRef}>
+        {viewMode === "table" && <p className="table-view-hint">Double-click an email to open it.</p>}
+        {viewMode === "table" && (
+          <div className="table-header table-columns" aria-hidden="true">
+            <span>From</span>
+            <span>Subject</span>
+            <span>Category</span>
+            <span className="table-folder">Folder</span>
+            <span className="table-status">Status</span>
+            <span className="table-date">Date</span>
+          </div>
+        )}
+        {[...reclassifyingIds]
+          .filter((id) => selectedMailboxId == null || id === selectedMailboxId)
+          .map((id) => {
+            const progress = reclassifyProgress[id] ?? { processed: 0, total: 0, failed: 0 };
+            const classified = Math.max(0, progress.processed - progress.failed);
+            const percent = progress.total ? Math.min(100, Math.round(classified * 100 / progress.total)) : 0;
+            return (
+              <div className="reclassify-progress-card" key={id} role="status" aria-live="polite">
+                <div className="reclassify-progress-head">
+                  <strong>{accountName(id)}</strong>
+                  <span>{classified.toLocaleString()} / {progress.total.toLocaleString()} classified</span>
+                </div>
+                <div className="modern-progress" aria-label={`${percent}% classified`}>
+                  <span style={{ width: `${percent}%` }} />
+                </div>
+                <div className="reclassify-progress-meta"><span>{percent}%</span>{progress.failed > 0 && <span>{progress.failed} failed</span>}</div>
+              </div>
+            );
+          })}
+        <div
+          className={`message-scroll view-${viewMode}`}
+          ref={scrollRef}
+          tabIndex={0}
+          role="region"
+          aria-label="Messages; use Up and Down arrows to select"
+          onKeyDown={onMessageListKeyDown}
+        >
           {!loading && listRows.length > 0 && (
             <div
               className="virtual-list"
@@ -1587,12 +1823,12 @@ export default function App() {
                       email={email}
                       viewMode={viewMode}
                       active={selectedId === email.id}
-                      showLabel={label === "all"}
                       accountAddress={accountAddress}
                       when={when}
                       folder={mailFolderOf(email)}
                       folderTitle={MAIL_FOLDER_TITLES[mailFolderOf(email)]}
-                      onOpen={(id) => void onOpenEmail(id)}
+                      onOpen={(id) => viewMode === "table" ? selectTableEmail(id) : void onOpenEmail(id)}
+                      onDoubleOpen={openTableEmail}
                     />
                   </div>
                 );
@@ -1603,6 +1839,8 @@ export default function App() {
             <p className="hint pad">
               {searchQuery
                 ? "No emails match this search."
+                : label === "interview_scheduled" && interviewSubtype !== "all"
+                  ? `No ${INTERVIEW_SUBTYPE_TITLES[interviewSubtype].toLowerCase()} interviews match these filters.`
                 : folder === "all"
                   ? "No classified emails yet. Sync an account."
                   : `No emails in ${MAIL_FOLDER_TITLES[folder]}. Sync to refresh folder labels.`}
@@ -1617,7 +1855,7 @@ export default function App() {
 
       <button
         type="button"
-        className="pane-splitter"
+        className="pane-splitter reader-splitter"
         aria-label="Resize message list"
         onPointerDown={onSplitterPointerDown("list")}
         onPointerMove={onSplitterPointerMove}
@@ -1625,7 +1863,22 @@ export default function App() {
         onPointerCancel={onSplitterPointerUp}
       />
 
-      <section className="pane-reader">
+      {viewMode === "table" && tableDialogOpen && (
+        <div className="table-dialog-backdrop" role="presentation" onClick={closeTableDialog} />
+      )}
+      <section
+        className="pane-reader"
+        ref={readerDialogRef}
+        role={viewMode === "table" && tableDialogOpen ? "dialog" : undefined}
+        aria-modal={viewMode === "table" && tableDialogOpen ? true : undefined}
+        aria-label={viewMode === "table" && tableDialogOpen ? selected?.subject || "Email" : undefined}
+      >
+        {viewMode === "table" && tableDialogOpen && (
+          <div className="table-dialog-toolbar">
+            <span>Email</span>
+            <button type="button" className="dialog-close" ref={readerCloseRef} onClick={closeTableDialog} aria-label="Close email">×</button>
+          </div>
+        )}
         {!selected && !loadingDetail && (
           <div className="reader-empty">
             <p>Select a message to read</p>
@@ -1634,7 +1887,7 @@ export default function App() {
         {loadingDetail && <div className="reader-empty"><p>Opening…</p></div>}
         {selected && !loadingDetail && (
           <article className="reader-article">
-            <h1>{selected.subject || "(no subject)"}</h1>
+            <h1 id="reader-title">{selected.subject || "(no subject)"}</h1>
             <div className="reader-card">
               <div className="reader-meta">
                 <div className="reader-people">
@@ -1670,6 +1923,44 @@ export default function App() {
                       </option>
                     ))}
                   </select>
+                  {selected.label === "interview_scheduled" && selected.interview_subtype && (
+                    <label className="interview-subtype-field">
+                      <span>Interview event</span>
+                      <span className="interview-subtype-control">
+                        <select
+                        value={selected.interview_subtype}
+                        disabled={savingLabel || pendingLabel != null}
+                        aria-label="Interview subtype"
+                        onChange={async (event) => {
+                          const subtype = event.target.value as InterviewSubtype;
+                          const emailId = selected.id;
+                          setSavingLabel(true);
+                          try {
+                            const updated = await updateEmailLabel(emailId, "interview_scheduled", true, subtype);
+                            setSelected((prev) => prev?.id === emailId ? { ...prev, ...updated } : prev);
+                            setEmails((prev) => {
+                              const currentSubtype = filterRef.current.interviewSubtype;
+                              if (currentSubtype !== "all" && currentSubtype !== updated.interview_subtype) {
+                                return prev.filter((item) => item.id !== emailId);
+                              }
+                              return prev.map((item) => item.id === emailId ? { ...item, ...updated } : item);
+                            });
+                            setUnusedTraining((count) => count + 1);
+                            void refreshPromptStatus();
+                          } catch (err) {
+                            setBanner(err instanceof Error ? err.message : "Could not update interview subtype");
+                          } finally {
+                            setSavingLabel(false);
+                          }
+                        }}
+                        >
+                          {(Object.entries(INTERVIEW_SUBTYPE_TITLES) as [InterviewSubtype, string][]).map(([value, title]) => (
+                            <option key={value} value={value}>{title}</option>
+                          ))}
+                        </select>
+                      </span>
+                    </label>
+                  )}
                   <label className="train-check">
                     <input
                       type="checkbox"
@@ -1738,11 +2029,28 @@ export default function App() {
               <h3 id="train-confirm-title">Prompt training</h3>
             </header>
             <div className="dialog-body">
+              {pendingLabel.nextLabel === "interview_scheduled" && (
+                <label className="dialog-email-label">
+                  Interview event
+                  <select
+                    value={pendingSubtype}
+                    onChange={(event) => setPendingSubtype(event.target.value as InterviewSubtype | "")}
+                    aria-label="Interview subtype"
+                    required
+                  >
+                    <option value="">Choose a subtype</option>
+                    {(Object.entries(INTERVIEW_SUBTYPE_TITLES) as [InterviewSubtype, string][]).map(([value, title]) => (
+                      <option key={value} value={value}>{title}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <p className="dialog-hint">Use this email as prompt update training data?</p>
               <div className="dialog-actions">
                 <button
                   type="button"
                   className="action-btn"
+                  disabled={pendingLabel.nextLabel === "interview_scheduled" && !pendingSubtype}
                   onClick={() => void applyCategoryChange(false)}
                 >
                   No
@@ -1750,6 +2058,7 @@ export default function App() {
                 <button
                   type="button"
                   className="primary-btn"
+                  disabled={pendingLabel.nextLabel === "interview_scheduled" && !pendingSubtype}
                   onClick={() => void applyCategoryChange(true)}
                 >
                   Yes
@@ -1762,7 +2071,7 @@ export default function App() {
 
       {addAccountOpen && (
         <div
-          className="dialog-backdrop"
+          className="dialog-backdrop connect-dialog"
           role="presentation"
           onClick={(e) => {
             if (e.target === e.currentTarget) closeAddAccount();
@@ -1835,28 +2144,6 @@ export default function App() {
             )}
           </div>
         </div>
-      )}
-      {settingsOpen && (
-        <SettingsPage
-          section={settingsSection}
-          onSectionChange={setSettingsSection}
-          onClose={() => setSettingsOpen(false)}
-          themePref={themePref}
-          onThemeChange={chooseTheme}
-          viewMode={viewMode}
-          onViewModeChange={chooseViewMode}
-          inboxType={inboxType}
-          onInboxTypeChange={chooseInboxType}
-          fontFamily={fontFamily}
-          onFontFamilyChange={chooseFontFamily}
-          fontSize={fontSize}
-          onFontSizeChange={chooseFontSize}
-          mailboxes={mailboxes}
-          unusedTraining={unusedTraining}
-          updatingPrompt={updatingPrompt}
-          onUpdatePrompt={onUpdatePrompt}
-          initialMailboxId={selectedMailboxId}
-        />
       )}
     </div>
   );

@@ -7,28 +7,36 @@ import re
 from openai import AsyncOpenAI
 
 from app.classify.prompt_store import get_active_system_prompt
-from app.config import get_settings
+from app.classify.prompt import with_interview_subtype_rules
 from app.models import EmailLabel
 from app.schemas import ClassificationResult
+from app.config import get_settings
+from app.services.ai_backend import AiBackend, get_ai_backend, has_saved_ai_settings
 
 logger = logging.getLogger(__name__)
 
 VALID_LABELS = {label.value for label in EmailLabel}
+VALID_INTERVIEW_SUBTYPES = {"confirmation", "calendar_invite", "reminder", "reschedule", "time_change", "cancellation"}
 
 LEGACY_LABEL_MAP = {
     "tech": EmailLabel.ASSESSMENT.value,
-    "available": EmailLabel.SCREENING.value,
-    "alert": EmailLabel.JOB_ALERT.value,
-    "application_submitted": EmailLabel.APPLIED.value,
-    "new_opportunity": EmailLabel.JOB_ALERT.value,
-    "recruiter_outreach": EmailLabel.JOB_ALERT.value,
-    "talent_pool": EmailLabel.OTHERS.value,
-    "company_news": EmailLabel.OTHERS.value,
-    "career_event": EmailLabel.OTHERS.value,
-    "profile_update_request": EmailLabel.OTHERS.value,
-    "withdrawn": EmailLabel.REJECTED.value,
+    "available": EmailLabel.INTERVIEW_INVITATION.value,
+    "alert": EmailLabel.RECRUITMENT_ALERT.value,
+    "job_alert": EmailLabel.RECRUITMENT_ALERT.value,
+    "applied": EmailLabel.APPLICATION_CONFIRMATION.value,
+    "interview": EmailLabel.INTERVIEW_INVITATION.value,
+    "rejected": EmailLabel.REJECTED_CLOSED.value,
+    "others": EmailLabel.OTHER.value,
+    "application_submitted": EmailLabel.APPLICATION_CONFIRMATION.value,
+    "new_opportunity": EmailLabel.RECRUITMENT_ALERT.value,
+    "recruiter_outreach": EmailLabel.RECRUITMENT_ALERT.value,
+    "talent_pool": EmailLabel.OTHER.value,
+    "company_news": EmailLabel.OTHER.value,
+    "career_event": EmailLabel.OTHER.value,
+    "profile_update_request": EmailLabel.APPLICATION_ACTION_REQUIRED.value,
+    "withdrawn": EmailLabel.REJECTED_CLOSED.value,
     "hired": EmailLabel.OFFER.value,
-    "unknown": EmailLabel.OTHERS.value,
+    "unknown": EmailLabel.OTHER.value,
 }
 
 
@@ -36,7 +44,7 @@ def normalize_label(raw: str) -> str:
     label = raw.lower().strip().replace(" ", "_")
     label = LEGACY_LABEL_MAP.get(label, label)
     if label not in VALID_LABELS:
-        return EmailLabel.OTHERS.value
+        return EmailLabel.OTHER.value
     return label
 
 
@@ -47,19 +55,36 @@ def _parse_label(content: str) -> tuple[str, float | None]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
-            return EmailLabel.OTHERS.value, None
+            return EmailLabel.OTHER.value, None
         try:
             data = json.loads(match.group(0))
         except json.JSONDecodeError:
-            return EmailLabel.OTHERS.value, None
+            return EmailLabel.OTHER.value, None
 
-    label = normalize_label(str(data.get("label", EmailLabel.OTHERS.value)))
+    label = normalize_label(str(data.get("label", EmailLabel.OTHER.value)))
     confidence = data.get("confidence")
     try:
         confidence_f = float(confidence) if confidence is not None else None
     except (TypeError, ValueError):
         confidence_f = None
     return label, confidence_f
+
+
+def _parse_interview_subtype(content: str) -> str | None:
+    try:
+        data = json.loads(content.strip())
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(data, dict):
+        return None
+    subtype = data.get("interview_subtype")
+    return subtype if isinstance(subtype, str) and subtype in VALID_INTERVIEW_SUBTYPES else None
 
 
 def _combined_text(subject: str, sender: str, body_text: str, snippet: str) -> str:
@@ -158,6 +183,10 @@ def _is_true_interview_invite(text: str) -> bool:
         r"\bi('ll| will) call you\b.*\binterview\b",
         r"\binterview\b.*\bi('ll| will) call you\b",
         r"\bbook\s+(a|your)\s+(time|slot)\b.*\binterview\b",
+        r"\bselect (your|an?) interview (slot|time)\b",
+        r"\b(interview|meeting)\b.{0,100}\b(scheduling link|choose a time|pick a slot)\b",
+        r"\b(scheduling link|choose a time|pick a slot|book your interview)\b.{0,100}\binterview\b",
+        r"\bbook your interview\b",
     ]
     return any(re.search(p, text) for p in patterns)
 
@@ -190,6 +219,8 @@ def _is_true_rejection(text: str) -> bool:
         r"\bnot (?:able|eligible) to hire (?:you )?(?:in|from) your (?:current )?location\b",
         r"\bproceed with (?:other\s+)?candidates\b",
         r"\bdecided to proceed with (?:other\s+)?candidates\b",
+        r"\b(?:the|this) (?:role|position|job) (?:has been|is) filled\b",
+        r"\b(?:the|this) (?:role|position|job) (?:has been|is) closed\b",
         r"\bbetter align with our current hiring needs\b",
     ]
     return any(re.search(p, text) for p in patterns)
@@ -302,15 +333,81 @@ def _looks_like_cold_jd_blast(text: str) -> bool:
     )
 
 
+def infer_interview_subtype(subject: str, sender: str, body_text: str, snippet: str) -> str:
+    """Metadata for scheduled interviews; never a primary category."""
+    text = _combined_text(subject, sender, body_text, snippet)
+    if re.search(r"\b(interview|meeting)\b.{0,100}\b(cancelled|canceled)\b|\b(cancelled|canceled)\b.{0,100}\b(interview|meeting)\b", text):
+        return "cancellation"
+    if re.search(r"\b(reschedul\w*|moved to|new date)\b", text):
+        return "reschedule"
+    if re.search(r"\b(time change|different time|time has changed|updated time)\b", text):
+        return "time_change"
+    if re.search(r"\breminder\b|\binterview tomorrow\b", text):
+        return "reminder"
+    if re.search(r"\bcalendar (invitation|invite|event)\b|\binvitation from google calendar\b", text):
+        return "calendar_invite"
+    return "confirmation"
+
+
+def _is_scheduled_interview(text: str) -> bool:
+    if _looks_like_cold_jd_blast(text) or _is_application_received(text):
+        return False
+    return any(re.search(pattern, text) for pattern in (
+        r"\b(your|the) interview (is|has been|was|will be) (scheduled|confirmed|moved|rescheduled|cancelled|canceled)\b",
+        r"\bconfirmed for your interview\b",
+        r"\binterview\b.{0,90}\b(on|at)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|\d{1,2}(:\d{2})?\s*(am|pm))\b",
+        r"\b(calendar invite|calendar invitation|reminder|reschedule|time change|different time|cancelled|canceled)\b.{0,120}\binterview\b",
+        r"\binterview\b.{0,120}\b(calendar invite|calendar invitation|reminder|reschedule|time change|different time|cancelled|canceled)\b",
+        r"\binterview(?:er)?\b.{0,100}\b(time has changed|different time|updated time)\b",
+    ))
+
+
+def _is_application_action_required(text: str) -> bool:
+    if not re.search(r"\b(application|candidate|profile|resume|cv|job portal|workday)\b", text):
+        return False
+    return any(re.search(pattern, text) for pattern in (
+        r"\b(complete|finish|update) (your|the) (profile|application)\b",
+        r"\b(upload|submit) (your|the|a) (resume|cv|missing (information|documents?))\b",
+        r"\b(reset|set) (your|the) password\b",
+        r"\b(missing information|action required|additional information required)\b",
+    ))
+
+
+def _is_interview_follow_up(text: str) -> bool:
+    return any(re.search(pattern, text) for pattern in (
+        r"\bthank you for (interviewing|meeting|speaking) with (us|our team)\b",
+        r"\bfollow[- ]up (after|to|from) (your|the|our) interview\b",
+        r"\b(post[- ]interview|interview feedback|feedback on your interview)\b",
+        r"\bnext steps following (your|the) interview\b",
+    ))
+
+
+def _is_offer(text: str) -> bool:
+    return any(re.search(pattern, text) for pattern in (
+        r"\boffer letter\b",
+        r"\b(pleased|excited|delighted) to offer you\b",
+        r"\bcompensation (package|details|discussion)\b",
+        r"\bnegotiat\w* (your |the )?offer\b",
+    ))
+
+
 def _heuristic_label(subject: str, sender: str, body_text: str, snippet: str) -> str | None:
     text = _combined_text(subject, sender, body_text, snippet)
 
     if _is_true_rejection(text):
-        return EmailLabel.REJECTED.value
+        return EmailLabel.REJECTED_CLOSED.value
+    if _is_offer(text):
+        return EmailLabel.OFFER.value
+    if _is_application_action_required(text):
+        return EmailLabel.APPLICATION_ACTION_REQUIRED.value
+    if _is_scheduled_interview(text):
+        return EmailLabel.INTERVIEW_SCHEDULED.value
+    if _is_interview_follow_up(text):
+        return EmailLabel.INTERVIEW_FOLLOW_UP.value
     if _is_application_received(text):
-        return EmailLabel.APPLIED.value
+        return EmailLabel.APPLICATION_CONFIRMATION.value
     if _looks_like_cold_jd_blast(text):
-        return EmailLabel.JOB_ALERT.value
+        return EmailLabel.RECRUITMENT_ALERT.value
 
     alert_signals = [
         "jobs that might interest you",
@@ -322,8 +419,6 @@ def _heuristic_label(subject: str, sender: str, body_text: str, snippet: str) ->
         "unsubscribe",
         "you have an interesting background",
         "fast track your application",
-        "virtual agent",
-        "click here to start a quick conversation",
         "we are currently working with one of our top clients",
         "surely you may know someone",
         "browse our open positions",
@@ -333,14 +428,16 @@ def _heuristic_label(subject: str, sender: str, body_text: str, snippet: str) ->
         "wish to be contacted for job opportunities",
     ]
     if any(s in text for s in alert_signals):
-        return EmailLabel.JOB_ALERT.value
+        return EmailLabel.RECRUITMENT_ALERT.value
 
     if _is_true_assessment(text):
         return EmailLabel.ASSESSMENT.value
-    if _is_pre_interview_screen(text) or _is_true_screening(text):
+    if _is_pre_interview_screen(text) or _is_true_screening(text) or re.search(
+        r"\b(recruiter questionnaire|screening questions|availability questions|chatbot questions)\b", text
+    ):
         return EmailLabel.SCREENING.value
     if _is_true_interview_invite(text):
-        return EmailLabel.INTERVIEW.value
+        return EmailLabel.INTERVIEW_INVITATION.value
     return None
 
 
@@ -355,17 +452,9 @@ def apply_label_guards(
     """Force known heuristic outcomes over a mistaken model label."""
     heuristic = _heuristic_label(subject, sender, body_text, snippet)
     text = _combined_text(subject, sender, body_text, snippet)
-    if heuristic == EmailLabel.REJECTED.value:
-        return EmailLabel.REJECTED.value
-    if heuristic == EmailLabel.APPLIED.value:
-        return EmailLabel.APPLIED.value
-    if heuristic == EmailLabel.JOB_ALERT.value:
-        return EmailLabel.JOB_ALERT.value
-    if heuristic == EmailLabel.INTERVIEW.value:
-        return EmailLabel.INTERVIEW.value
-    if heuristic == EmailLabel.SCREENING.value:
-        return EmailLabel.SCREENING.value
-    if label == EmailLabel.INTERVIEW.value and (
+    if heuristic is not None:
+        return heuristic
+    if label in (EmailLabel.INTERVIEW_INVITATION.value, EmailLabel.INTERVIEW_SCHEDULED.value) and (
         _is_pre_interview_screen(text) or _is_true_screening(text)
     ):
         return EmailLabel.SCREENING.value
@@ -382,45 +471,52 @@ async def classify_email(
     use_openai: bool = True,
 ) -> ClassificationResult:
     heuristic = _heuristic_label(subject, sender, body_text, snippet)
-    settings = get_settings()
+    if has_saved_ai_settings():
+        backend = get_ai_backend()
+    else:
+        settings = get_settings()
+        backend = AiBackend("openai", settings.openai_model, settings.openai_api_key)
 
     # Heuristic-only path (fallback or tests). Live/Sync use OpenAI + guards.
     if not force_openai and not use_openai:
         return ClassificationResult(
-            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.OTHER.value),  # type: ignore[arg-type]
             confidence=0.55 if heuristic else 0.35,
             response_id=None,
         )
-    if not settings.openai_api_key:
+    if not backend.api_key:
         return ClassificationResult(
-            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.OTHER.value),  # type: ignore[arg-type]
             confidence=0.45 if heuristic else None,
             response_id=None,
         )
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = backend.client() if backend.provider == "ollama" else AsyncOpenAI(api_key=backend.api_key)
     user_content = (
         f"From: {sender}\nSubject: {subject}\nSnippet: {snippet}\n\nBody:\n{body_text[:6000]}"
     )
     try:
         response = await client.chat.completions.create(
-            model=settings.openai_model,
+            model=backend.model,
             temperature=0,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": get_active_system_prompt()},
+                {"role": "system", "content": with_interview_subtype_rules(get_active_system_prompt())},
                 {"role": "user", "content": user_content},
             ],
         )
     except Exception:
-        logger.exception("OpenAI classification failed; using heuristic")
+        logger.exception("%s classification failed", backend.provider)
+        if backend.provider == "ollama":
+            raise
         return ClassificationResult(
-            label=(heuristic or EmailLabel.OTHERS.value),  # type: ignore[arg-type]
+            label=(heuristic or EmailLabel.OTHER.value),  # type: ignore[arg-type]
             confidence=0.45 if heuristic else None,
             response_id=None,
         )
     content = response.choices[0].message.content or "{}"
     label, confidence = _parse_label(content)
+    subtype = _parse_interview_subtype(content)
     label = apply_label_guards(
         label,
         subject=subject,
@@ -431,6 +527,7 @@ async def classify_email(
 
     return ClassificationResult(
         label=label,  # type: ignore[arg-type]
+        interview_subtype=(subtype or infer_interview_subtype(subject, sender, body_text, snippet)) if label == EmailLabel.INTERVIEW_SCHEDULED.value else None,
         confidence=confidence,
         response_id=response.id,
     )

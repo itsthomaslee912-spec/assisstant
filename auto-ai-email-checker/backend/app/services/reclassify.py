@@ -4,11 +4,12 @@ import asyncio
 import logging
 from typing import Any
 
-from app.classify.openai_classifier import classify_email
+from app.classify.openai_classifier import classify_email, infer_interview_subtype
 from app.classify.outcome_extract import BACKFILL_LABELS, OUTCOME_LABELS, extract_company_role
-from app.models import EmailMessage, MailboxConnection
+from app.models import EmailLabel, EmailMessage, MailboxConnection
 from app.realtime.sse import publish
 from app.schemas import EmailOut
+from app.services.ai_backend import get_ai_backend
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ def get_reclassify_status(mailbox_id: int) -> dict[str, Any]:
                 "mailbox_id": mailbox_id,
                 "state": "idle",
                 "updated": 0,
+                "processed": 0,
                 "failed": 0,
                 "total": 0,
                 "message": "",
@@ -63,6 +65,7 @@ async def start_mailbox_reclassify(mailbox_id: int) -> dict[str, Any]:
             mailbox_id,
             state="running",
             updated=0,
+            processed=0,
             failed=0,
             total=0,
             message="Starting reclassify...",
@@ -133,17 +136,20 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
             .all()
         )
         total = len(rows)
+        backend = get_ai_backend()
         await _publish_progress(
             mailbox_id,
             state="running",
             total=total,
             updated=0,
+            processed=0,
             failed=0,
-            message=f"Reclassifying {total} emails with OpenAI...",
+            message=f"Reclassifying {total} emails with {backend.provider.title()}...",
         )
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
         updated = 0
+        processed = 0
         failed = 0
 
         async def classify_row(
@@ -181,6 +187,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                     mailbox_id,
                     state="stopped",
                     updated=updated,
+                    processed=processed,
                     failed=failed,
                     total=total,
                     message=f"Reclassify stopped — updated {updated} of {total}",
@@ -190,6 +197,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
             chunk = rows[start : start + CONCURRENCY * 4]
             outcomes = await asyncio.gather(*(classify_row(row) for row in chunk))
             for outcome in outcomes:
+                processed += 1
                 if outcome is None:
                     failed += 1
                     continue
@@ -200,9 +208,14 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                     continue
                 if email.human_corrected:
                     continue
-                label_changed = email.label != result.label or email.confidence != result.confidence
+                new_subtype = (
+                    result.interview_subtype or infer_interview_subtype(email.subject, email.sender, email.body_text, email.snippet)
+                    if result.label == EmailLabel.INTERVIEW_SCHEDULED.value else None
+                )
+                label_changed = email.label != result.label or email.confidence != result.confidence or email.interview_subtype != new_subtype
                 if label_changed:
                     email.label = result.label
+                    email.interview_subtype = new_subtype
                     email.confidence = result.confidence
                     email.openai_response_id = result.response_id
                 outcome_changed = False
@@ -227,6 +240,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
             await _publish_progress(
                 mailbox_id,
                 updated=updated,
+                processed=processed,
                 failed=failed,
                 total=total,
                 message=f"Reclassified {min(start + len(chunk), total)} of {total} — {updated} changed",
@@ -236,6 +250,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
             mailbox_id,
             state="done",
             updated=updated,
+            processed=processed,
             failed=failed,
             total=total,
             message=f"Reclassify complete — updated {updated} of {total}",

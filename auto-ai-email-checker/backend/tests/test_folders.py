@@ -99,7 +99,7 @@ def test_list_emails_filters_folder():
                 subject="Inbox",
                 sender="a@b.com",
                 snippet="hi",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.INBOX.value,
             ),
             EmailMessage(
@@ -108,7 +108,7 @@ def test_list_emails_filters_folder():
                 subject="Spam",
                 sender="a@b.com",
                 snippet="hi",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.SPAM.value,
             ),
             EmailMessage(
@@ -117,7 +117,7 @@ def test_list_emails_filters_folder():
                 subject="Trash",
                 sender="a@b.com",
                 snippet="hi",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.TRASH.value,
             ),
         ]
