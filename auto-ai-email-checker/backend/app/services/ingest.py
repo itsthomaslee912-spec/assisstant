@@ -79,7 +79,8 @@ async def ingest_normalized_message(
         snippet=(normalized.get("snippet") or "")[:1000],
         body_text=normalized.get("body_text") or "",
         body_html=normalized.get("body_html") or "",
-        label=classification.label if classification else EmailLabel.UNKNOWN.value,
+        label=classification.label if classification else EmailLabel.OTHER.value,
+        classification_pending=download_only,
         interview_subtype=(
             classification.interview_subtype or infer_interview_subtype(
                 normalized.get("subject") or "",

@@ -322,7 +322,7 @@ def test_system_prompt_lists_every_label():
     from app.classify.openai_classifier import normalize_label
     from app.classify.prompt import CLASSIFY_TYPES, SYSTEM_PROMPT
 
-    slugs = {item.value for item in EmailLabel if item != EmailLabel.UNKNOWN}
+    slugs = {item.value for item in EmailLabel}
     assert {item.slug for item in CLASSIFY_TYPES} == slugs
     assert "unknown" not in slugs
     for slug in slugs:

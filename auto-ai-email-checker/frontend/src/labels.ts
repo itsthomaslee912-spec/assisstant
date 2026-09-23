@@ -10,7 +10,6 @@ export const INTERVIEW_SUBTYPE_TITLES: Record<InterviewSubtype, string> = {
 };
 
 export const CLASSIFY_LABELS: EmailLabel[] = [
-  "unknown",
   "application_confirmation",
   "application_action_required",
   "screening",
@@ -25,7 +24,6 @@ export const CLASSIFY_LABELS: EmailLabel[] = [
 ];
 
 export const CLASSIFY_LABEL_TITLES: Record<EmailLabel, string> = {
-  unknown: "Unknown",
   application_confirmation: "Application Confirmation",
   application_action_required: "Application Action Required",
   screening: "Screening",
@@ -44,7 +42,6 @@ export const EMPTY_LABEL_COUNTS: Record<EmailLabel, number> = Object.fromEntries
 ) as Record<EmailLabel, number>;
 
 export const LABEL_BAR_COLORS: Record<EmailLabel, string> = {
-  unknown: "#697586",
   application_confirmation: "#b7a6ff",
   application_action_required: "#e1adff",
   screening: "#8ee0b5",

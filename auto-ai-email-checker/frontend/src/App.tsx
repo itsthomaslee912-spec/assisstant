@@ -1,4 +1,4 @@
-import { CSSProperties, Dispatch, FormEvent, KeyboardEvent, PointerEvent, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, Dispatch, DragEvent, FormEvent, KeyboardEvent, PointerEvent, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import EmailBody from "./components/EmailBody";
 import MessageRow from "./components/MessageRow";
@@ -11,6 +11,9 @@ import {
   fetchClassifyPromptStatus,
   fetchEmailDetail,
   fetchEmails,
+  createAiReply,
+  fetchReclassifyStatus,
+  sendEmail,
   fetchMailboxes,
   markAllRead,
   oauthStartUrl,
@@ -65,6 +68,8 @@ const LIST_MIN = 240;
 const READER_MIN = 280;
 const ACCOUNTS_W_KEY = "email-checker-accounts-w";
 const LIST_W_KEY = "email-checker-list-w";
+const ACCOUNTS_LIST_H_KEY = "email-checker-accounts-list-h";
+const ACCOUNTS_ORDER_KEY = "email-checker-accounts-order";
 
 function loadStoredWidth(key: string, fallback: number, min: number): number {
   try {
@@ -76,15 +81,17 @@ function loadStoredWidth(key: string, fallback: number, min: number): number {
   return fallback;
 }
 
-const MAIL_FOLDERS: MailFolder[] = ["inbox", "spam", "trash", "archive"];
+const MAIL_FOLDERS: MailFolder[] = ["inbox", "sent", "spam", "trash", "archive"];
 const MAIL_FOLDER_TITLES: Record<MailFolder, string> = {
   inbox: "Inbox",
+  sent: "Sent",
   spam: "Spam",
   trash: "Trash",
   archive: "Archive",
 };
 const EMPTY_FOLDER_COUNTS: Record<MailFolder, number> = {
   inbox: 0,
+  sent: 0,
   spam: 0,
   trash: 0,
   archive: 0,
@@ -246,6 +253,10 @@ function providerMark(provider: Provider): string {
 
 export default function App() {
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
+  const [accountOrder, setAccountOrder] = useState<number[]>(() => {
+    try { return JSON.parse(localStorage.getItem(ACCOUNTS_ORDER_KEY) ?? "[]"); } catch { return []; }
+  });
+  const [draggedAccountId, setDraggedAccountId] = useState<number | null>(null);
   const [emails, setEmails] = useState<EmailItem[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(null);
   const [label, setLabel] = useState<"all" | EmailLabel>("all");
@@ -261,7 +272,6 @@ export default function App() {
   const [nextReceivedAt, setNextReceivedAt] = useState<string | null>(null);
   const [nextIsRead, setNextIsRead] = useState<boolean | null>(null);
   const [labelCounts, setLabelCounts] = useState<Record<EmailLabel, number>>(EMPTY_LABEL_COUNTS);
-  const [mailboxCounts, setMailboxCounts] = useState<Record<number, number>>({});
   const [mailboxUnreadCounts, setMailboxUnreadCounts] = useState<Record<number, number>>({});
   const [folderCounts, setFolderCounts] = useState<Record<MailFolder, number>>(EMPTY_FOLDER_COUNTS);
   const [error, setError] = useState<string | null>(null);
@@ -279,10 +289,6 @@ export default function App() {
   const [syncingIds, setSyncingIds] = useState<Set<number>>(() => new Set());
   const [reclassifyingIds, setReclassifyingIds] = useState<Set<number>>(() => new Set());
   const [reclassifyProgress, setReclassifyProgress] = useState<Record<number, { processed: number; total: number; failed: number }>>({});
-  const [actionStatus, setActionStatus] = useState<{
-    type: "sync" | "reclassify" | "success" | "error";
-    message: string;
-  } | null>(null);
   const [mailboxActions, setMailboxActions] = useState<Record<number, {
     type: "sync" | "reclassify" | "success" | "error";
     message: string;
@@ -305,6 +311,7 @@ export default function App() {
   const [collapsedDates, setCollapsedDates] = useState<Set<string>>(new Set());
   const [accountsW, setAccountsW] = useState(() => loadStoredWidth(ACCOUNTS_W_KEY, 260, ACCOUNTS_MIN));
   const [listW, setListW] = useState(() => loadStoredWidth(LIST_W_KEY, 360, LIST_MIN));
+  const [accountsListH, setAccountsListH] = useState(() => loadStoredWidth(ACCOUNTS_LIST_H_KEY, 118, 72));
   const [themePref, setThemePref] = useState<ThemePref>(() => loadThemePref());
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewMode());
   const [inboxType, setInboxType] = useState<InboxType>(() => loadInboxType());
@@ -313,6 +320,14 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
   const [resizing, setResizing] = useState(false);
+  const [replyOpen, setReplyOpen] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [replyFiles, setReplyFiles] = useState<File[]>([]);
+  const [scheduleAt, setScheduleAt] = useState("");
+  const [sendingReply, setSendingReply] = useState(false);
+  const [aiDrafting, setAiDrafting] = useState(false);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [schedulePickerOpen, setSchedulePickerOpen] = useState(false);
 
   const filterRef = useRef({
     mailboxId: selectedMailboxId,
@@ -337,13 +352,18 @@ export default function App() {
   const readerDialogRef = useRef<HTMLElement>(null);
   const readerCloseRef = useRef<HTMLButtonElement>(null);
   const didMountFilters = useRef(false);
+  // Mailbox navigation starts its own load so the list (including date-group
+  // counts) is refreshed from the clicked scope immediately.
+  const skipNextMailboxFilterLoad = useRef(false);
   const shellRef = useRef<HTMLDivElement>(null);
+  const accountsPaneRef = useRef<HTMLElement>(null);
   const dragRef = useRef<{
     which: "accounts" | "list";
     startX: number;
     startAccounts: number;
     startList: number;
   } | null>(null);
+  const accountHeightDragRef = useRef<{ startY: number; startH: number } | null>(null);
   const widthsRef = useRef({ accounts: accountsW, list: listW });
   widthsRef.current = { accounts: accountsW, list: listW };
   const mailboxesRef = useRef(mailboxes);
@@ -388,7 +408,6 @@ export default function App() {
     setNextReceivedAt(page.next_received_at ?? null);
     setNextIsRead(page.next_is_read ?? null);
     setLabelCounts(parseLabelCounts(page.label_counts));
-    setMailboxCounts(parseMailboxCounts(page.mailbox_counts));
     setMailboxUnreadCounts(parseMailboxCounts(page.mailbox_unread_counts ?? {}));
     setFolderCounts(parseFolderCounts(page.folder_counts));
   }, []);
@@ -487,6 +506,24 @@ export default function App() {
     }
   }, []);
 
+  const refreshReclassifyStatuses = useCallback(async () => {
+    if (!mailboxes.length) return;
+    const results = await Promise.allSettled(mailboxes.map((mailbox) => fetchReclassifyStatus(mailbox.id)));
+    const running = new Set<number>();
+    const progress: Record<number, { processed: number; total: number; failed: number }> = {};
+    results.forEach((result) => {
+      if (result.status !== "fulfilled") return;
+      const status = result.value;
+      if (status.state !== "running") return;
+      running.add(status.mailbox_id);
+      progress[status.mailbox_id] = { processed: status.processed, total: status.total, failed: status.failed };
+      setMailboxAction(status.mailbox_id, "reclassify", status.message || "Reclassifying in the background…");
+    });
+    reclassifyingIdsRef.current = running;
+    setReclassifyingIds(running);
+    setReclassifyProgress((previous) => ({ ...previous, ...progress }));
+  }, [mailboxes]);
+
   const load = useCallback(async () => {
     setError(null);
     try {
@@ -545,6 +582,12 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [refreshAutoSyncStatus]);
 
+  useEffect(() => {
+    void refreshReclassifyStatuses();
+    const timer = window.setInterval(() => void refreshReclassifyStatuses(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [refreshReclassifyStatuses]);
+
   async function retryAutoSync() {
     if (autoSyncChecking) return;
     setAutoSyncChecking(true);
@@ -562,6 +605,10 @@ export default function App() {
   useEffect(() => {
     if (!didMountFilters.current) {
       didMountFilters.current = true;
+      return;
+    }
+    if (skipNextMailboxFilterLoad.current) {
+      skipNextMailboxFilterLoad.current = false;
       return;
     }
     setEmails([]);
@@ -646,10 +693,6 @@ export default function App() {
           return;
         }
 
-        setMailboxCounts((prev) => ({
-          ...prev,
-          [item.mailbox_id]: (prev[item.mailbox_id] ?? 0) + 1,
-        }));
         if (!item.is_read) {
           setMailboxUnreadCounts((prev) => ({
             ...prev,
@@ -824,6 +867,25 @@ export default function App() {
     };
   }
 
+  function onAccountHeightSplitterDown(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    accountHeightDragRef.current = { startY: event.clientY, startH: accountsListH };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function onAccountHeightSplitterMove(event: PointerEvent<HTMLButtonElement>) {
+    const drag = accountHeightDragRef.current;
+    const pane = accountsPaneRef.current;
+    if (!drag || !pane) return;
+    const max = Math.max(72, pane.clientHeight - 270);
+    setAccountsListH(Math.round(Math.max(72, Math.min(max, drag.startH + event.clientY - drag.startY))));
+  }
+
+  function onAccountHeightSplitterUp() {
+    accountHeightDragRef.current = null;
+    try { localStorage.setItem(ACCOUNTS_LIST_H_KEY, String(Math.round(accountsListH))); } catch { /* ignore */ }
+  }
+
   function onSplitterPointerMove(event: PointerEvent<HTMLButtonElement>) {
     const drag = dragRef.current;
     const shell = shellRef.current;
@@ -885,9 +947,37 @@ export default function App() {
     return map;
   }, [mailboxes]);
 
+  const orderedMailboxes = useMemo(() => {
+    const index = new Map(accountOrder.map((id, position) => [id, position]));
+    return [...mailboxes].sort((a, b) => (index.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (index.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+  }, [mailboxes, accountOrder]);
+
+  function onAccountDragStart(event: DragEvent<HTMLDivElement>, id: number) {
+    setDraggedAccountId(id);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(id));
+  }
+
+  function onAccountDrop(event: DragEvent<HTMLDivElement>, targetId: number) {
+    event.preventDefault();
+    const sourceId = draggedAccountId ?? Number(event.dataTransfer.getData("text/plain"));
+    setDraggedAccountId(null);
+    if (!Number.isFinite(sourceId) || sourceId === targetId) return;
+    setAccountOrder((previous) => {
+      const ids = orderedMailboxes.map((mailbox) => mailbox.id);
+      const source = ids.indexOf(sourceId);
+      const target = ids.indexOf(targetId);
+      if (source < 0 || target < 0) return previous;
+      ids.splice(source, 1);
+      ids.splice(target, 0, sourceId);
+      try { localStorage.setItem(ACCOUNTS_ORDER_KEY, JSON.stringify(ids)); } catch { /* ignore */ }
+      return ids;
+    });
+  }
+
   const inboxCount = useMemo(
-    () => Object.values(mailboxCounts).reduce((sum, n) => sum + n, 0),
-    [mailboxCounts]
+    () => Object.values(mailboxUnreadCounts).reduce((sum, n) => sum + n, 0),
+    [mailboxUnreadCounts]
   );
 
   const allCount = useMemo(
@@ -1159,18 +1249,14 @@ export default function App() {
 
   async function onUpdatePrompt() {
     setUpdatingPrompt(true);
-    setActionStatus({ type: "reclassify", message: "Updating classify prompt from training data…" });
+    setBanner("Updating classify prompt from training data…");
     try {
       const result = await updateClassifyPrompt();
       await refreshPromptStatus();
-      setActionStatus({
-        type: "success",
-        message: result.message || `Classify prompt updated from ${result.example_count} example(s)`,
-      });
-      window.setTimeout(() => setActionStatus(null), 4000);
+      setBanner(result.message || `Classify prompt updated from ${result.example_count} example(s)`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to update classify prompt";
-      setActionStatus({ type: "error", message: msg });
+      setBanner(msg);
     } finally {
       setUpdatingPrompt(false);
     }
@@ -1302,7 +1388,57 @@ export default function App() {
       void loadFirstPage();
       return;
     }
+
+    // State updates are asynchronous. Keep the request's filter snapshot in
+    // sync with the clicked row before loading, rather than waiting for the
+    // effect after render. This prevents the previous mailbox's date headings
+    // and counts from remaining visible during navigation.
+    filterRef.current = { ...filterRef.current, mailboxId: id };
+    skipNextMailboxFilterLoad.current = true;
     setSelectedMailboxId(id);
+    setEmails([]);
+    void loadFirstPage();
+  }
+
+  async function filePayload(files: File[]) {
+    return Promise.all(files.map((file) => new Promise<{ name: string; content_type: string; content_base64: string }>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+      reader.onload = () => resolve({ name: file.name, content_type: file.type || "application/octet-stream", content_base64: String(reader.result).split(",")[1] || "" });
+      reader.readAsDataURL(file);
+    })));
+  }
+
+  async function sendReply() {
+    if (!selected || !replyMailbox || !replyText.trim()) return;
+    const run = async () => {
+      setSendingReply(true);
+      try {
+        await sendEmail({ mailbox_id: replyMailbox.id, to_address: selected.sender.match(/<([^>]+)>/)?.[1] ?? selected.sender, subject: /^re:/i.test(selected.subject) ? selected.subject : `Re: ${selected.subject}`, body_text: replyText, attachments: await filePayload(replyFiles) });
+        setBanner(scheduleAt ? "Reply scheduled and sent." : "Reply sent. It is now in Sent.");
+        setReplyOpen(false); setReplyText(""); setReplyFiles([]); setScheduleAt("");
+        if (folder === "sent") void loadFirstPage();
+      } catch (err) { setBanner(err instanceof Error ? err.message : "Could not send reply"); }
+      finally { setSendingReply(false); }
+    };
+    const when = scheduleAt ? new Date(scheduleAt).getTime() : 0;
+    if (when > Date.now()) { window.setTimeout(() => void run(), when - Date.now()); setBanner(`Reply scheduled for ${new Date(when).toLocaleString()}. Keep this app open until it sends.`); return; }
+    await run();
+  }
+
+  async function draftAiReply() {
+    if (!selected) return;
+    setAiDrafting(true);
+    try { setReplyText((await createAiReply(selected.id)).body_text); }
+    catch (err) { setBanner(err instanceof Error ? err.message : "Could not create AI draft"); }
+    finally { setAiDrafting(false); }
+  }
+
+  function chooseSchedulePreset(daysFromToday: number, hour: number) {
+    const date = new Date();
+    date.setDate(date.getDate() + daysFromToday);
+    date.setHours(hour, 0, 0, 0);
+    setScheduleAt(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(hour).padStart(2, "0")}:00`);
   }
 
   function selectLabel(next: "all" | EmailLabel) {
@@ -1336,9 +1472,7 @@ export default function App() {
   }
 
   const selectedMailbox = selectedMailboxId != null ? mailboxById.get(selectedMailboxId) : null;
-  const actionMailboxIds = selectedMailbox ? [selectedMailbox.id] : mailboxes.map((mailbox) => mailbox.id);
-  const scopeSyncing = actionMailboxIds.some((id) => syncingIds.has(id));
-  const scopeReclassifying = actionMailboxIds.some((id) => reclassifyingIds.has(id));
+  const replyMailbox = selected ? mailboxById.get(selected.mailbox_id) ?? selectedMailbox : selectedMailbox;
   const scopeUnread = useMemo(() => {
     if (selectedMailboxId == null) {
       return Object.values(mailboxUnreadCounts).reduce((sum, n) => sum + n, 0);
@@ -1419,7 +1553,7 @@ export default function App() {
         onFontFamilyChange={chooseFontFamily}
         fontSize={fontSize}
         onFontSizeChange={chooseFontSize}
-        mailboxes={mailboxes}
+        mailboxes={orderedMailboxes}
         unusedTraining={unusedTraining}
         updatingPrompt={updatingPrompt}
         onUpdatePrompt={onUpdatePrompt}
@@ -1432,6 +1566,14 @@ export default function App() {
           setAddAccountOpen(true);
         }}
         onRemoveAccount={onDisconnect}
+        syncingIds={syncingIds}
+        reclassifyingIds={reclassifyingIds}
+        onSyncAccount={(id) => onSync(id, false)}
+        onStopSyncAccount={(id) => onStopSync(id, false)}
+        onReclassifyAccount={(id) => onReclassify(id, false)}
+        onStopReclassifyAccount={(id) => onStopReclassify(id, false)}
+        accountStatus={mailboxActions}
+        reclassifyProgress={reclassifyProgress}
         initialMailboxId={selectedMailboxId}
       />
     );
@@ -1445,10 +1587,11 @@ export default function App() {
         {
           "--accounts-w": `${accountsW}px`,
           "--list-w": `${listW}px`,
+          "--accounts-list-h": `${accountsListH}px`,
         } as CSSProperties
       }
     >
-      <aside className="pane-accounts">
+      <aside className="pane-accounts" ref={accountsPaneRef}>
         <div className="accounts-top">
           <div className="brand-mini">Auto AI Email Checker</div>
           <div className="accounts-top-actions">
@@ -1506,15 +1649,23 @@ export default function App() {
             ▣
           </span>
           <span>Inbox</span>
-          <span className="nav-count">{inboxCount}</span>
+          {inboxCount > 0 && <span className="nav-count">{inboxCount}</span>}
         </button>
 
         <div className="accounts-label">Accounts</div>
         <div className="accounts-scroll">
-          {mailboxes.map((box) => {
+          {orderedMailboxes.map((box) => {
             const unread = mailboxUnreadCounts[box.id] ?? 0;
             return (
-              <div key={box.id} className="account-row-wrap">
+              <div
+                key={box.id}
+                className={draggedAccountId === box.id ? "account-row-wrap is-dragging" : "account-row-wrap"}
+                draggable
+                onDragStart={(event) => onAccountDragStart(event, box.id)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => onAccountDrop(event, box.id)}
+                onDragEnd={() => setDraggedAccountId(null)}
+              >
                 <button
                   type="button"
                   className={
@@ -1540,6 +1691,16 @@ export default function App() {
           })}
           {!mailboxes.length && <p className="hint">Add an account to start automatic sync.</p>}
         </div>
+        <button
+          type="button"
+          className="account-height-splitter"
+          aria-label="Resize accounts and filters panels"
+          title="Drag to resize account list"
+          onPointerDown={onAccountHeightSplitterDown}
+          onPointerMove={onAccountHeightSplitterMove}
+          onPointerUp={onAccountHeightSplitterUp}
+          onPointerCancel={onAccountHeightSplitterUp}
+        />
 
         <div className="account-filter-panel" aria-label="Email filters">
           <div className="account-filter-section">
@@ -1589,36 +1750,6 @@ export default function App() {
                 {selectedMailbox ? selectedMailbox.email_address : "All accounts"}
               </h2>
               <div className="list-header-actions">
-                <button
-                  type="button"
-                  className={scopeSyncing ? "action-btn busy" : "action-btn"}
-                  disabled={!actionMailboxIds.length || scopeReclassifying}
-                  title={selectedMailbox ? "Scan this account and download missing messages" : "Scan all connected accounts"}
-                  onClick={() => {
-                    if (scopeSyncing) {
-                      actionMailboxIds.filter((id) => syncingIds.has(id)).forEach((id) => void onStopSync(id, false));
-                    } else {
-                      actionMailboxIds.forEach((id) => void onSync(id, false));
-                    }
-                  }}
-                >
-                  {scopeSyncing ? "Stop sync" : selectedMailbox ? "Sync" : "Sync all"}
-                </button>
-                <button
-                  type="button"
-                  className={scopeReclassifying ? "action-btn busy" : "action-btn"}
-                  disabled={!actionMailboxIds.length || scopeSyncing}
-                  title={selectedMailbox ? "Classify this account using the selected AI model" : "Classify all connected accounts"}
-                  onClick={() => {
-                    if (scopeReclassifying) {
-                      actionMailboxIds.filter((id) => reclassifyingIds.has(id)).forEach((id) => void onStopReclassify(id, false));
-                    } else {
-                      actionMailboxIds.forEach((id) => void onReclassify(id, false));
-                    }
-                  }}
-                >
-                  {scopeReclassifying ? "Stop reclassify" : selectedMailbox ? "Reclassify" : "Reclassify all"}
-                </button>
                 <button
                   type="button"
                   className="action-btn"
@@ -1679,47 +1810,6 @@ export default function App() {
           </div>
         )}
 
-        {actionStatus && (
-          <div className={`action-toast ${actionStatus.type}`} role="status">
-            {(actionStatus.type === "sync" || actionStatus.type === "reclassify") && (
-              <span className="spinner" aria-hidden="true" />
-            )}
-            <span>{actionStatus.message}</span>
-            {(actionStatus.type === "success" || actionStatus.type === "error") && (
-              <button type="button" onClick={() => setActionStatus(null)}>
-                Dismiss
-              </button>
-            )}
-          </div>
-        )}
-
-        {mailboxes
-          .filter((box) => selectedMailboxId == null || box.id === selectedMailboxId)
-          .map((box) => {
-            const status = mailboxActions[box.id];
-            if (!status) return null;
-            return (
-              <div key={box.id} className={`action-toast ${status.type}`} role="status">
-                {(status.type === "sync" || status.type === "reclassify") && (
-                  <span className="spinner" aria-hidden="true" />
-                )}
-                <span>{status.message}</span>
-                {(status.type === "success" || status.type === "error") && (
-                  <button
-                    type="button"
-                    onClick={() => setMailboxActions((prev) => {
-                      const next = { ...prev };
-                      delete next[box.id];
-                      return next;
-                    })}
-                  >
-                    Dismiss
-                  </button>
-                )}
-              </div>
-            );
-          })}
-
         {banner && (
           <div className="banner inline" role="status">
             <span>{banner}</span>
@@ -1742,25 +1832,6 @@ export default function App() {
             <span className="table-date">Date</span>
           </div>
         )}
-        {[...reclassifyingIds]
-          .filter((id) => selectedMailboxId == null || id === selectedMailboxId)
-          .map((id) => {
-            const progress = reclassifyProgress[id] ?? { processed: 0, total: 0, failed: 0 };
-            const classified = Math.max(0, progress.processed - progress.failed);
-            const percent = progress.total ? Math.min(100, Math.round(classified * 100 / progress.total)) : 0;
-            return (
-              <div className="reclassify-progress-card" key={id} role="status" aria-live="polite">
-                <div className="reclassify-progress-head">
-                  <strong>{accountName(id)}</strong>
-                  <span>{classified.toLocaleString()} / {progress.total.toLocaleString()} classified</span>
-                </div>
-                <div className="modern-progress" aria-label={`${percent}% classified`}>
-                  <span style={{ width: `${percent}%` }} />
-                </div>
-                <div className="reclassify-progress-meta"><span>{percent}%</span>{progress.failed > 0 && <span>{progress.failed} failed</span>}</div>
-              </div>
-            );
-          })}
         <div
           className={`message-scroll view-${viewMode}`}
           ref={scrollRef}
@@ -1800,7 +1871,6 @@ export default function App() {
                           {collapsed ? "▸" : "▾"}
                         </span>
                         <span className="date-heading">{row.heading}</span>
-                        <span className="group-count">{row.count}</span>
                       </button>
                     </div>
                   );
@@ -1977,10 +2047,48 @@ export default function App() {
                 text={selected.body_text}
                 snippet={selected.snippet}
               />
+              {!replyOpen && (
+                <div className="reply-action-row">
+                  <button type="button" className="action-btn primary" onClick={() => { setScheduleAt(""); setReplyOpen(true); }}>
+                    ↩ Reply
+                  </button>
+                </div>
+              )}
+              {replyOpen && (
+                <section className="reply-composer" aria-label="Reply composer">
+                  <header>
+                    <strong>Reply</strong>
+                    <span>From {replyMailbox?.email_address ?? "selected account"} to {selected.sender}</span>
+                    <button type="button" aria-label="Delete reply draft" title="Delete draft" onClick={() => { setReplyOpen(false); setReplyText(""); setReplyFiles([]); setScheduleAt(""); }}>🗑</button>
+                  </header>
+                  <textarea autoFocus value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Write your reply" />
+                  <footer>
+                    <div className="reply-tools">
+                      <button type="button" className="action-btn" disabled={aiDrafting} onClick={() => void draftAiReply()}>{aiDrafting ? "Drafting…" : "✦ AI draft"}</button>
+                      <label className="reply-attach">📎 Attach<input type="file" multiple onChange={(event) => setReplyFiles(Array.from(event.target.files ?? []))} /></label>
+                      {replyFiles.length > 0 && <span>{replyFiles.map((file) => file.name).join(", ")}</span>}
+                    </div>
+                    <div className="reply-send-tools">
+                      <div className="send-split"><button type="button" className="primary-btn" disabled={sendingReply || !replyText.trim() || !replyMailbox} onClick={() => { setScheduleAt(""); void sendReply(); }}>{sendingReply ? "Sending…" : "Send"}</button><button type="button" className="primary-btn send-menu" title="Schedule send" aria-label="Schedule send" disabled={sendingReply || !replyMailbox} onClick={() => { setSchedulePickerOpen(false); setScheduleDialogOpen(true); }}>◷</button></div>
+                    </div>
+                  </footer>
+                </section>
+              )}
             </div>
           </article>
         )}
       </section>
+
+      {scheduleDialogOpen && (
+        <div className="dialog-backdrop" role="presentation">
+          <div className="dialog schedule-dialog" role="dialog" aria-modal="true" aria-labelledby="schedule-send-title">
+            <header className="dialog-header"><div><h3 id="schedule-send-title">Schedule send</h3><p>Eastern Daylight Time</p></div><button type="button" className="dialog-close" aria-label="Close" onClick={() => setScheduleDialogOpen(false)}>×</button></header>
+            <div className="schedule-presets"><button type="button" onClick={() => chooseSchedulePreset(1, 8)}><span>Tomorrow morning</span><small>8:00 AM</small></button><button type="button" onClick={() => chooseSchedulePreset(0, 13)}><span>This afternoon</span><small>1:00 PM</small></button><button type="button" onClick={() => chooseSchedulePreset((8 - new Date().getDay()) % 7 || 7, 8)}><span>Monday morning</span><small>8:00 AM</small></button></div>
+            <div className="schedule-custom"><button type="button" onClick={() => setSchedulePickerOpen((open) => !open)}>▣ <span>Pick date & time</span></button>{schedulePickerOpen && <input type="datetime-local" value={scheduleAt} min={new Date().toISOString().slice(0, 16)} onChange={(event) => setScheduleAt(event.target.value)} />}</div>
+            {scheduleAt && <div className="dialog-actions schedule-confirm"><button type="button" className="primary-btn" onClick={() => { setScheduleDialogOpen(false); void sendReply(); }}>Schedule send</button></div>}
+          </div>
+        </div>
+      )}
 
       {markAllOpen && (
         <div className="dialog-backdrop" role="presentation">

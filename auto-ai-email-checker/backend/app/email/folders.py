@@ -29,6 +29,8 @@ def folder_from_gmail_labels(label_ids: list | None) -> str:
         return MailFolder.TRASH.value
     if "SPAM" in labels:
         return MailFolder.SPAM.value
+    if "SENT" in labels:
+        return MailFolder.SENT.value
     if "INBOX" in labels:
         return MailFolder.INBOX.value
     return MailFolder.ARCHIVE.value

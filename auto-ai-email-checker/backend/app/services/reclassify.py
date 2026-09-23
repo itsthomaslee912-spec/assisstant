@@ -54,7 +54,7 @@ async def _publish_progress(mailbox_id: int, **fields: Any) -> None:
     await publish("reclassify.progress", dict(job))
 
 
-async def start_mailbox_reclassify(mailbox_id: int) -> dict[str, Any]:
+async def start_mailbox_reclassify(mailbox_id: int, *, pending_only: bool = False) -> dict[str, Any]:
     async with _job_lock:
         current = _jobs.get(mailbox_id)
         if mailbox_id in _running or (current and current.get("state") == "running"):
@@ -68,9 +68,9 @@ async def start_mailbox_reclassify(mailbox_id: int) -> dict[str, Any]:
             processed=0,
             failed=0,
             total=0,
-            message="Starting reclassify...",
+            message="Starting queued reclassification..." if pending_only else "Starting reclassify...",
         )
-    asyncio.create_task(_run_reclassify_job(mailbox_id))
+    asyncio.create_task(_run_reclassify_job(mailbox_id, pending_only=pending_only))
     return dict(job)
 
 
@@ -103,7 +103,30 @@ async def start_all_active_reclassify() -> list[dict[str, Any]]:
     return started
 
 
-async def _run_reclassify_job(mailbox_id: int) -> None:
+async def start_all_pending_reclassify() -> list[dict[str, Any]]:
+    """Resume fast-import emails that still need an AI category."""
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        ids = [
+            row[0]
+            for row in db.query(MailboxConnection.id)
+            .join(EmailMessage, EmailMessage.mailbox_id == MailboxConnection.id)
+            .filter(
+                MailboxConnection.is_active.is_(True),
+                EmailMessage.classification_pending.is_(True),
+                EmailMessage.human_corrected.is_not(True),
+            )
+            .distinct()
+            .all()
+        ]
+    finally:
+        db.close()
+    return [await start_mailbox_reclassify(mailbox_id, pending_only=True) for mailbox_id in ids]
+
+
+async def _run_reclassify_job(mailbox_id: int, *, pending_only: bool = False) -> None:
     from app.db import SessionLocal
 
     db = SessionLocal()
@@ -118,7 +141,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
             await publish("reclassify.done", get_reclassify_status(mailbox_id))
             return
 
-        rows = (
+        query = (
             db.query(
                 EmailMessage.id,
                 EmailMessage.subject,
@@ -132,9 +155,10 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                 EmailMessage.mailbox_id == mailbox_id,
                 EmailMessage.human_corrected.is_not(True),
             )
-            .order_by(EmailMessage.id.desc())
-            .all()
         )
+        if pending_only:
+            query = query.filter(EmailMessage.classification_pending.is_(True))
+        rows = query.order_by(EmailMessage.id.desc()).all()
         total = len(rows)
         backend = get_ai_backend()
         await _publish_progress(
@@ -144,7 +168,10 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
             updated=0,
             processed=0,
             failed=0,
-            message=f"Reclassifying {total} emails with {backend.provider.title()}...",
+            message=(
+                f"Classifying {total} queued emails with {backend.provider.title()}..."
+                if pending_only else f"Reclassifying {total} emails with {backend.provider.title()}..."
+            ),
         )
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
@@ -213,6 +240,7 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                     if result.label == EmailLabel.INTERVIEW_SCHEDULED.value else None
                 )
                 label_changed = email.label != result.label or email.confidence != result.confidence or email.interview_subtype != new_subtype
+                was_pending = email.classification_pending
                 if label_changed:
                     email.label = result.label
                     email.interview_subtype = new_subtype
@@ -226,7 +254,9 @@ async def _run_reclassify_job(mailbox_id: int) -> None:
                 elif should_extract and label_changed and email.label in OUTCOME_LABELS:
                     email.outcome_extracted = False
                     outcome_changed = True
-                if label_changed or outcome_changed:
+                if was_pending:
+                    email.classification_pending = False
+                if label_changed or outcome_changed or was_pending:
                     db.commit()
                     if label_changed:
                         db.refresh(email)

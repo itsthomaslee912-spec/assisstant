@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.oauth_google import ensure_google_access_token
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
-from app.db import get_db
-from app.classify.outcome_extract import OUTCOME_LABELS
+from app.db import SessionLocal, get_db
+from app.classify.outcome_extract import OUTCOME_LABELS, apply_outcome
 from app.models import EmailLabel, EmailMessage, MailboxConnection, Provider
 from app.realtime.gmail_watch import stop_gmail_watch
 from app.realtime.outlook_subscriptions import (
@@ -273,6 +273,34 @@ def mailbox_outcomes(
         total=len(page),
         label=label,
     )
+
+
+async def _extract_outcomes_for_label(mailbox_id: int, label: str) -> None:
+    db = SessionLocal()
+    try:
+        rows = db.query(EmailMessage).filter(
+            EmailMessage.mailbox_id == mailbox_id,
+            EmailMessage.label == label,
+        ).all()
+        for row in rows:
+            if await apply_outcome(db, row, force=True):
+                db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/{mailbox_id}/outcomes/extract")
+async def extract_mailbox_outcomes(
+    mailbox_id: int,
+    background_tasks: BackgroundTasks,
+    label: str = Query(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    if label not in {EmailLabel.REJECTED_CLOSED.value, EmailLabel.INTERVIEW_INVITATION.value}:
+        raise HTTPException(status_code=400, detail="Choose Rejected / Closed or Interview Invitation")
+    _active_mailbox(db, mailbox_id)
+    background_tasks.add_task(_extract_outcomes_for_label, mailbox_id, label)
+    return {"ok": True, "message": "AI extraction started in the background"}
 
 
 @router.delete("/{mailbox_id}")

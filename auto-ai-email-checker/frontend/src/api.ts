@@ -1,5 +1,4 @@
 export type EmailLabel =
-  | "unknown"
   | "application_confirmation"
   | "application_action_required"
   | "screening"
@@ -12,7 +11,7 @@ export type EmailLabel =
   | "recruitment_alert"
   | "other";
 
-export type MailFolder = "inbox" | "spam" | "trash" | "archive";
+export type MailFolder = "inbox" | "sent" | "spam" | "trash" | "archive";
 export type InterviewSubtype = "confirmation" | "calendar_invite" | "reminder" | "reschedule" | "time_change" | "cancellation";
 
 export type Provider = "google" | "microsoft";
@@ -261,6 +260,50 @@ export async function fetchClassifyTraining(opts?: {
   return res.json();
 }
 
+export interface ReclassifyStatus {
+  mailbox_id: number;
+  state: "running" | "done" | "stopped" | "error" | string;
+  updated: number;
+  processed: number;
+  failed: number;
+  total: number;
+  message: string;
+}
+
+export async function fetchReclassifyStatus(id: number): Promise<ReclassifyStatus> {
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/reclassify-status`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load reclassification status"));
+  return res.json();
+}
+
+export interface EmailAttachment {
+  name: string;
+  content_type: string;
+  content_base64: string;
+}
+
+export async function sendEmail(payload: {
+  mailbox_id: number;
+  to_address: string;
+  subject: string;
+  body_text: string;
+  attachments?: EmailAttachment[];
+}): Promise<{ ok: boolean; provider_message_id: string | null }> {
+  const res = await apiFetch(`${API_BASE}/api/emails/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to send email"));
+  return res.json();
+}
+
+export async function createAiReply(id: number): Promise<{ body_text: string }> {
+  const res = await apiFetch(`${API_BASE}/api/emails/${id}/ai-reply`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to create AI draft"));
+  return res.json();
+}
+
 export interface AiSettings {
   provider: "openai" | "ollama";
   openai_model: string;
@@ -363,7 +406,7 @@ export interface MailboxOutcomes {
   label: string | null;
 }
 
-export type OutcomeLabel = "application_confirmation" | "rejected_closed" | "screening" | "interview_scheduled";
+export type OutcomeLabel = "application_confirmation" | "rejected_closed" | "screening" | "interview_scheduled" | "interview_invitation";
 
 function statsRangeParams(dateFrom: string, dateTo: string): URLSearchParams {
   return new URLSearchParams({
@@ -433,6 +476,13 @@ export interface SyncStartResult {
 export async function syncMailbox(id: number): Promise<SyncStartResult> {
   const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/sync`, { method: "POST" });
   if (!res.ok) throw new Error(await readApiError(res, "Failed to sync mailbox"));
+  return res.json();
+}
+
+export async function extractMailboxOutcomes(mailboxId: number, label: "rejected_closed" | "interview_invitation"): Promise<{ ok: boolean; message: string }> {
+  const params = new URLSearchParams({ label });
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${mailboxId}/outcomes/extract?${params}`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to start AI extraction"));
   return res.json();
 }
 

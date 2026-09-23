@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import base64
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.auth.oauth_google import ensure_google_access_token
 from app.classify.outcome_extract import OUTCOME_LABELS, apply_outcome
 from app.classify.openai_classifier import infer_interview_subtype
+from app.services.ai_backend import get_ai_backend
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
 from app.db import SessionLocal, get_db
 from app.email.gmail import (
@@ -37,6 +39,7 @@ from app.schemas import (
     MarkAllReadOut,
     SendEmailIn,
     SendEmailOut,
+    AiReplyOut,
 )
 
 logger = logging.getLogger(__name__)
@@ -442,6 +445,15 @@ async def send_email(payload: SendEmailIn, db: Session = Depends(get_db)) -> Sen
     to_address = payload.to_address.strip()
     if "@" not in to_address:
         raise HTTPException(status_code=400, detail="Invalid recipient email")
+    try:
+        attachments = [{
+            "name": item.name,
+            "content_type": item.content_type,
+            "content_base64": item.content_base64,
+            "content": base64.b64decode(item.content_base64, validate=True),
+        } for item in payload.attachments]
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="One attachment is invalid") from exc
 
     if mailbox.provider == Provider.GOOGLE.value:
         token = await ensure_google_access_token(db, mailbox)
@@ -452,8 +464,9 @@ async def send_email(payload: SendEmailIn, db: Session = Depends(get_db)) -> Sen
             body_text=payload.body_text,
             from_name=mailbox.display_name,
             from_email=mailbox.email_address,
+            attachments=attachments,
         )
-        return SendEmailOut(ok=True, provider_message_id=result.get("id"))
+        provider_message_id = result.get("id")
 
     if mailbox.provider == Provider.MICROSOFT.value:
         token = await ensure_microsoft_access_token(db, mailbox)
@@ -462,7 +475,40 @@ async def send_email(payload: SendEmailIn, db: Session = Depends(get_db)) -> Sen
             to_address=to_address,
             subject=payload.subject.strip() or "(no subject)",
             body_text=payload.body_text,
+            attachments=attachments,
         )
-        return SendEmailOut(ok=True, provider_message_id=None)
+        provider_message_id = None
 
-    raise HTTPException(status_code=400, detail="Unsupported provider")
+    elif mailbox.provider not in (Provider.GOOGLE.value, Provider.MICROSOFT.value):
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+
+    # Save an immediate local Sent copy so the Sent folder updates without waiting
+    # for the next provider sync.
+    sent = EmailMessage(
+        mailbox_id=mailbox.id, provider_message_id=provider_message_id or f"local-sent-{datetime.now(timezone.utc).timestamp()}",
+        subject=payload.subject.strip() or "(no subject)", sender=f"To: {to_address}",
+        received_at=datetime.now(timezone.utc), snippet=payload.body_text[:500], body_text=payload.body_text,
+        folder=MailFolder.SENT.value, is_read=True, label=EmailLabel.OTHER.value,
+    )
+    db.add(sent)
+    db.commit()
+    return SendEmailOut(ok=True, provider_message_id=provider_message_id)
+
+
+@router.post("/{email_id}/ai-reply", response_model=AiReplyOut)
+async def ai_reply(email_id: int, db: Session = Depends(get_db)) -> AiReplyOut:
+    email = _from_active_mailbox(db.query(EmailMessage)).filter(EmailMessage.id == email_id).one_or_none()
+    if email is None:
+        raise HTTPException(status_code=404, detail="Email not found")
+    backend = get_ai_backend()
+    if not backend.api_key:
+        raise HTTPException(status_code=400, detail="Configure an AI model before creating a draft")
+    response = await backend.client().chat.completions.create(
+        model=backend.model,
+        temperature=0.4,
+        messages=[
+            {"role": "system", "content": "Write a concise, professional email reply. Use only supplied context and do not invent facts. Return only the reply body."},
+            {"role": "user", "content": f"From: {email.sender}\nSubject: {email.subject}\n\nMessage history/context:\n{(email.body_text or email.snippet)[:8000]}"},
+        ],
+    )
+    return AiReplyOut(body_text=(response.choices[0].message.content or "").strip())

@@ -16,7 +16,6 @@ class Provider(str, Enum):
 
 
 class EmailLabel(str, Enum):
-    UNKNOWN = "unknown"
     APPLICATION_CONFIRMATION = "application_confirmation"
     APPLICATION_ACTION_REQUIRED = "application_action_required"
     SCREENING = "screening"
@@ -32,6 +31,7 @@ class EmailLabel(str, Enum):
 
 class MailFolder(str, Enum):
     INBOX = "inbox"
+    SENT = "sent"
     SPAM = "spam"
     TRASH = "trash"
     ARCHIVE = "archive"
@@ -111,6 +111,7 @@ class EmailMessage(Base):
     openai_response_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_read: Mapped[bool] = mapped_column(default=False)
     human_corrected: Mapped[bool] = mapped_column(default=False)
+    classification_pending: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     mailbox: Mapped[MailboxConnection] = relationship(back_populates="emails")

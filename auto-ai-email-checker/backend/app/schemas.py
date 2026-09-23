@@ -28,7 +28,6 @@ UtcDateTime = Annotated[
 ]
 
 EmailLabelLiteral = Literal[
-    "unknown",
     "application_confirmation",
     "application_action_required",
     "screening",
@@ -96,16 +95,27 @@ class EmailDetailOut(EmailOut):
     body_html: str = ""
 
 
+class EmailAttachmentIn(BaseModel):
+    name: str
+    content_type: str = "application/octet-stream"
+    content_base64: str
+
+
 class SendEmailIn(BaseModel):
     mailbox_id: int
     to_address: str
     subject: str
     body_text: str
+    attachments: list[EmailAttachmentIn] = []
 
 
 class SendEmailOut(BaseModel):
     ok: bool
     provider_message_id: str | None = None
+
+
+class AiReplyOut(BaseModel):
+    body_text: str
 
 
 class HealthOut(BaseModel):

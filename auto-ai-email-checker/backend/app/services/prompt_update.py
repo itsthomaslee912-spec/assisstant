@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 EXAMPLE_BODY_CAP = 400
 MAX_EXAMPLES = 40
-ALLOWED_SLUGS = {label.value for label in EmailLabel if label != EmailLabel.UNKNOWN}
+ALLOWED_SLUGS = {label.value for label in EmailLabel}
 
 PROMPT_UPDATE_SYSTEM = """You improve a recruiting-email classification SYSTEM prompt from human corrections.
 Return a single JSON object only: {"rules":"<concise additive classification rules>"}.

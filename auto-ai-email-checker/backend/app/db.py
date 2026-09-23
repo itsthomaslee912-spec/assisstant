@@ -81,8 +81,8 @@ def _is_current_taxonomy_prompt(text: str) -> bool:
     if not text:
         return False
     from app.models import EmailLabel
+    return all(f"- {item.value}" in text for item in EmailLabel)
 
-    return all(f"- {item.value} —" in text for item in EmailLabel if item != EmailLabel.UNKNOWN)
 
 
 def ensure_current_taxonomy_prompt() -> bool:
@@ -144,6 +144,13 @@ def init_db() -> None:
                             "ALTER TABLE email_messages ADD COLUMN human_corrected BOOLEAN DEFAULT 0"
                         )
                     )
+                if "classification_pending" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE email_messages "
+                            "ADD COLUMN classification_pending BOOLEAN DEFAULT 0"
+                        )
+                    )
                 if "folder" not in cols:
                     conn.execute(
                         text(
@@ -190,6 +197,13 @@ def init_db() -> None:
                         text("UPDATE email_messages SET label = :new WHERE label = :old"),
                         {"new": new, "old": old},
                     )
+                conn.execute(
+                    text(
+                        "UPDATE email_messages SET label = 'other', classification_pending = 1 "
+                        "WHERE label = 'unknown' AND COALESCE(human_corrected, 0) = 0"
+                    )
+                )
+                conn.execute(text("UPDATE email_messages SET label = 'other' WHERE label = 'unknown'"))
                 conn.execute(
                     text(
                         "CREATE INDEX IF NOT EXISTS ix_email_messages_received_id "

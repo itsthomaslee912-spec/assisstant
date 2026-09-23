@@ -59,6 +59,7 @@ export function saveInboxType(type: InboxType): void {
   writeStorage(INBOX_TYPE_KEY, type);
 }
 
+
 export function loadFontFamily(): FontFamily {
   const value = readStorage(FONT_KEY);
   if (

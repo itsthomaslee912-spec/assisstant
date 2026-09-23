@@ -2,14 +2,16 @@ import { CLASSIFY_LABELS, CLASSIFY_LABEL_TITLES, LABEL_BAR_COLORS } from "../lab
 
 export default function LabelPieChart({
   counts,
+  labels = CLASSIFY_LABELS,
 }: {
   counts: Record<string, number>;
+  labels?: readonly string[];
 }) {
-  const slices = CLASSIFY_LABELS.map((key) => ({
+  const slices = labels.map((key) => ({
     key,
     value: counts[key] ?? 0,
-    color: LABEL_BAR_COLORS[key],
-    title: CLASSIFY_LABEL_TITLES[key],
+    color: LABEL_BAR_COLORS[key as keyof typeof LABEL_BAR_COLORS],
+    title: CLASSIFY_LABEL_TITLES[key as keyof typeof CLASSIFY_LABEL_TITLES],
   }));
   const total = slices.reduce((sum, slice) => sum + slice.value, 0);
   const activeCount = slices.filter((slice) => slice.value > 0).length;

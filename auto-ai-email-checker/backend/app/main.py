@@ -13,6 +13,7 @@ from app.db import init_db
 from app.realtime.renewal import renewal_loop
 from app.services.outcome_backfill import backfill_outcomes
 from app.services.auto_sync import auto_sync_loop
+from app.services.reclassify import start_all_pending_reclassify
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(renewal_loop(stop_event))
     backfill_task = asyncio.create_task(backfill_outcomes(stop_event))
     auto_sync_task = asyncio.create_task(auto_sync_loop(stop_event))
+    pending_reclassify_task = asyncio.create_task(start_all_pending_reclassify())
     logger.info("Auto AI Email Checker API started")
     try:
         yield
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI):
         await task
         await backfill_task
         await auto_sync_task
+        await pending_reclassify_task
 
 
 def create_app() -> FastAPI:

@@ -197,12 +197,17 @@ async def outlook_send_message(
     to_address: str,
     subject: str,
     body_text: str,
+    attachments: list[dict] | None = None,
 ) -> None:
     payload = {
         "message": {
             "subject": subject,
             "body": {"contentType": "Text", "content": body_text},
             "toRecipients": [{"emailAddress": {"address": to_address}}],
+            "attachments": [
+                {"@odata.type": "#microsoft.graph.fileAttachment", "name": item["name"], "contentType": item["content_type"], "contentBytes": item["content_base64"]}
+                for item in (attachments or [])
+            ],
         },
         "saveToSentItems": True,
     }

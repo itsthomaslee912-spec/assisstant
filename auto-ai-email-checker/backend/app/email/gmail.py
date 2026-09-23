@@ -426,10 +426,22 @@ async def gmail_send_message(
     body_text: str,
     from_name: str | None = None,
     from_email: str | None = None,
+    attachments: list[dict] | None = None,
 ) -> dict:
     from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.base import MIMEBase
+    from email import encoders
 
-    message = MIMEText(body_text, "plain", "utf-8")
+    message = MIMEMultipart() if attachments else MIMEText(body_text, "plain", "utf-8")
+    if attachments:
+        message.attach(MIMEText(body_text, "plain", "utf-8"))
+        for item in attachments:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(item["content"])
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=item["name"])
+            message.attach(part)
     message["to"] = to_address
     message["subject"] = subject
     if from_email:

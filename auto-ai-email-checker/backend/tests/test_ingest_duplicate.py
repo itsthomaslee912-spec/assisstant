@@ -55,7 +55,7 @@ def test_concurrent_duplicate_import_does_not_fail_sync(tmp_path, monkeypatch):
         assert db.query(EmailMessage).count() == 1
 
 
-def test_download_only_saves_unknown_without_ai_processing(tmp_path, monkeypatch):
+def test_download_only_queues_other_without_ai_processing(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'download.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -86,7 +86,8 @@ def test_download_only_saves_unknown_without_ai_processing(tmp_path, monkeypatch
             download_only=True,
         ))
         assert email is not None
-        assert email.label == EmailLabel.UNKNOWN.value
+        assert email.label == EmailLabel.OTHER.value
+        assert email.classification_pending is True
         assert email.confidence is None
         assert email.interview_subtype is None
         assert email.outcome_extracted is False

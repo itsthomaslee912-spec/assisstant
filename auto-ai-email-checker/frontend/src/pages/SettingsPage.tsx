@@ -8,6 +8,7 @@ import {
   fetchOllamaModels,
   fetchOpenAiCosts,
   fetchMailboxLabelStats,
+  fetchMailboxOutcomes,
   saveAiSettings,
   type AiSettings,
   type OpenAiCosts,
@@ -15,6 +16,7 @@ import {
   type ClassifyTrainingExample,
   type Mailbox,
   type MailboxLabelStats,
+  type MailboxOutcomes,
 } from "../api";
 import { CLASSIFY_LABEL_TITLES, INTERVIEW_SUBTYPE_TITLES } from "../labels";
 import {
@@ -106,6 +108,14 @@ export default function SettingsPage({
   onTrainingDeleted,
   onAddAccount,
   onRemoveAccount,
+  syncingIds,
+  reclassifyingIds,
+  onSyncAccount,
+  onStopSyncAccount,
+  onReclassifyAccount,
+  onStopReclassifyAccount,
+  accountStatus,
+  reclassifyProgress,
   initialMailboxId = null,
 }: {
   section: SettingsSection;
@@ -128,6 +138,14 @@ export default function SettingsPage({
   onTrainingDeleted: () => Promise<void>;
   onAddAccount: () => void;
   onRemoveAccount: (mailboxId: number) => Promise<void>;
+  syncingIds: Set<number>;
+  reclassifyingIds: Set<number>;
+  onSyncAccount: (mailboxId: number) => Promise<void>;
+  onStopSyncAccount: (mailboxId: number) => Promise<void>;
+  onReclassifyAccount: (mailboxId: number) => Promise<void>;
+  onStopReclassifyAccount: (mailboxId: number) => Promise<void>;
+  accountStatus: Record<number, { type: "sync" | "reclassify" | "success" | "error"; message: string }>;
+  reclassifyProgress: Record<number, { processed: number; total: number; failed: number }>;
   initialMailboxId?: number | null;
 }) {
   const [promptStatus, setPromptStatus] = useState<ClassifyPromptStatus | null>(null);
@@ -203,6 +221,15 @@ export default function SettingsPage({
   const [stats, setStats] = useState<MailboxLabelStats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [outcomeLabel, setOutcomeLabel] = useState<"application_confirmation" | "rejected_closed" | "interview_invitation" | "interview_scheduled">("interview_invitation");
+  const [outcomePage, setOutcomePage] = useState(0);
+  const [outcomes, setOutcomes] = useState<MailboxOutcomes | null>(null);
+  const [outcomesLoading, setOutcomesLoading] = useState(false);
+  const [outcomeCompanyQuery, setOutcomeCompanyQuery] = useState("");
+  const [outcomePieOpen, setOutcomePieOpen] = useState(false);
+  const [outcomePieCounts, setOutcomePieCounts] = useState<Record<string, number> | null>(null);
+  const [outcomePieLoading, setOutcomePieLoading] = useState(false);
+  const OUTCOME_PAGE_SIZE = 20;
 
   useEffect(() => {
     if (section !== "training") return;
@@ -294,12 +321,57 @@ export default function SettingsPage({
     }
   }
 
+  async function loadOutcomes(mailboxId = statsMailboxId, page = outcomePage, label = outcomeLabel) {
+    if (mailboxId === "all") { setOutcomes(null); return; }
+    setOutcomesLoading(true);
+    try {
+      setOutcomes(await fetchMailboxOutcomes(mailboxId, localInputToUtcIso(dateFrom), localInputToUtcIso(dateTo), { label, limit: OUTCOME_PAGE_SIZE, offset: page * OUTCOME_PAGE_SIZE }));
+    } catch (err) { setStatsError(err instanceof Error ? err.message : "Failed to load extracted outcomes"); }
+    finally { setOutcomesLoading(false); }
+  }
+
+  async function copyOutcomes() {
+    if (!outcomes || statsMailboxId === "all") return;
+    const pages = await Promise.all(
+      Array.from({ length: Math.ceil(outcomes.total / 200) }, (_, index) =>
+        fetchMailboxOutcomes(statsMailboxId, localInputToUtcIso(dateFrom), localInputToUtcIso(dateTo), { label: outcomeLabel, limit: 200, offset: index * 200 })
+      )
+    );
+    const rows = pages.flatMap((page) => page.items);
+    await navigator.clipboard.writeText(["Company\tRole\tSubject", ...rows.map((item) => `${item.company}\t${item.role}\t${item.subject}`)].join("\n"));
+  }
+
+  const visibleOutcomes = useMemo(() => {
+    const query = outcomeCompanyQuery.trim().toLocaleLowerCase();
+    return !query ? outcomes?.items ?? [] : (outcomes?.items ?? []).filter((item) => item.company.toLocaleLowerCase().includes(query));
+  }, [outcomes, outcomeCompanyQuery]);
+
+  async function loadOutcomePie() {
+    if (statsMailboxId === "all") return;
+    setOutcomePieLoading(true);
+    try {
+      const labels: ("application_confirmation" | "rejected_closed" | "interview_invitation" | "interview_scheduled")[] = ["application_confirmation", "rejected_closed", "interview_invitation", "interview_scheduled"];
+      const fromIso = localInputToUtcIso(dateFrom);
+      const toIso = localInputToUtcIso(dateTo);
+      const pages = await Promise.all(labels.map((label) => fetchMailboxOutcomes(statsMailboxId, fromIso, toIso, { label, limit: 1, offset: 0 })));
+      setOutcomePieCounts(Object.fromEntries(pages.map((page, index) => [labels[index], page.total])));
+    } catch (err) { setStatsError(err instanceof Error ? err.message : "Failed to load extraction statistics"); }
+    finally { setOutcomePieLoading(false); }
+  }
+
   useEffect(() => {
     if (section !== "statistics") return;
     void loadStats();
     // Load once when opening Statistics.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [section]);
+
+  useEffect(() => {
+    if (section !== "statistics" || statsMailboxId === "all") return;
+    void loadOutcomes(statsMailboxId, outcomePage, outcomeLabel);
+    // Outcome browsing intentionally covers the full account history.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, statsMailboxId, outcomeLabel, outcomePage]);
 
   async function handleUpdatePrompt() {
     await onUpdatePrompt();
@@ -353,26 +425,67 @@ export default function SettingsPage({
                     <button type="button" className="action-btn primary" onClick={onAddAccount}>+ Add an account</button>
                   </div>
                   <div className="settings-account-list">
-                    {mailboxes.map((mailbox) => (
+                    {mailboxes.map((mailbox) => {
+                      const isWorking = syncingIds.has(mailbox.id) || reclassifyingIds.has(mailbox.id);
+                      const activeStatus = accountStatus[mailbox.id];
+                      return (
                       <div className="settings-account-row" key={mailbox.id}>
-                        <div>
+                        <div className="settings-account-info">
                           <strong>{mailbox.email_address}</strong>
                           <span>{mailbox.provider === "google" ? "Google Gmail" : "Microsoft Outlook"}</span>
                         </div>
-                        <button
-                          type="button"
-                          className="action-btn danger"
-                          disabled={removingMailboxId != null}
-                          onClick={() => {
-                            if (!window.confirm(`Remove ${mailbox.email_address} from this app?`)) return;
-                            setRemovingMailboxId(mailbox.id);
-                            void onRemoveAccount(mailbox.id).finally(() => setRemovingMailboxId(null));
-                          }}
-                        >
-                          {removingMailboxId === mailbox.id ? "Removing…" : "Remove"}
-                        </button>
+                        <div className="settings-account-actions">
+                          <button
+                            type="button"
+                            className={syncingIds.has(mailbox.id) ? "action-btn busy" : "action-btn"}
+                            disabled={reclassifyingIds.has(mailbox.id) || removingMailboxId != null}
+                            onClick={() => void (syncingIds.has(mailbox.id) ? onStopSyncAccount(mailbox.id) : onSyncAccount(mailbox.id))}
+                          >
+                            {syncingIds.has(mailbox.id) ? "Stop sync" : "Sync"}
+                          </button>
+                          <button
+                            type="button"
+                            className={reclassifyingIds.has(mailbox.id) ? "action-btn busy" : "action-btn"}
+                            disabled={syncingIds.has(mailbox.id) || removingMailboxId != null}
+                            onClick={() => void (reclassifyingIds.has(mailbox.id) ? onStopReclassifyAccount(mailbox.id) : onReclassifyAccount(mailbox.id))}
+                          >
+                            {reclassifyingIds.has(mailbox.id) ? "Stop reclassify" : "Reclassify"}
+                          </button>
+                          <button
+                            type="button"
+                            className="action-btn danger"
+                            disabled={syncingIds.has(mailbox.id) || reclassifyingIds.has(mailbox.id) || removingMailboxId != null}
+                            onClick={() => {
+                              if (!window.confirm(`Remove ${mailbox.email_address} from this app?`)) return;
+                              setRemovingMailboxId(mailbox.id);
+                              void onRemoveAccount(mailbox.id).finally(() => setRemovingMailboxId(null));
+                            }}
+                          >
+                            {removingMailboxId === mailbox.id ? "Removing…" : "Remove"}
+                          </button>
+                        </div>
+                        {isWorking && (
+                          <p className={`settings-account-status ${activeStatus?.type ?? "sync"}`} role="status">
+                            {activeStatus?.message ?? (syncingIds.has(mailbox.id) ? "Syncing this account…" : "Reclassifying this account…")}
+                          </p>
+                        )}
+                        {reclassifyingIds.has(mailbox.id) && (() => {
+                          const progress = reclassifyProgress[mailbox.id] ?? { processed: 0, total: 0, failed: 0 };
+                          const completed = Math.max(0, progress.processed - progress.failed);
+                          const percent = progress.total ? Math.min(100, Math.round(completed * 100 / progress.total)) : 0;
+                          return (
+                            <div className="settings-account-progress" role="status">
+                              <div className="settings-account-progress-label">
+                                <span>{completed.toLocaleString()} / {progress.total.toLocaleString()} classified</span>
+                                <strong>{percent}%</strong>
+                              </div>
+                              <div className="modern-progress"><span style={{ width: `${percent}%` }} /></div>
+                            </div>
+                          );
+                        })()}
                       </div>
-                    ))}
+                    );
+                    })}
                     {!mailboxes.length && <p className="settings-help">No email accounts are connected.</p>}
                   </div>
                 </section>
@@ -694,6 +807,7 @@ export default function SettingsPage({
                     className="stats-form stats-filter-card"
                     onSubmit={(event) => {
                       void loadStats(event);
+                      void loadOutcomes();
                     }}
                   >
                     <AccountSelect
@@ -702,7 +816,9 @@ export default function SettingsPage({
                       onChange={(value) => {
                         setStatsMailboxId(value);
                         setStats(null);
+                        setOutcomePage(0);
                         void loadStats(undefined, value);
+                        void loadOutcomes(value, 0);
                       }}
                     />
                     <DateTimeField label="From" value={dateFrom} onChange={setDateFrom} />
@@ -718,6 +834,36 @@ export default function SettingsPage({
                   {stats && (
                     <div className="stats-visuals stats-account">
                       <LabelPieChart counts={stats.label_counts} />
+                    </div>
+                  )}
+                  {statsMailboxId !== "all" && (
+                    <section className="outcome-browser">
+                      <div className="outcome-toolbar">
+                        <div>
+                          <h4>AI company & role extraction</h4>
+                          <p className="settings-help">Company and role saved from the selected recruiting category.</p>
+                        </div>
+                      </div>
+                      <div className="outcome-browser-actions">
+                          <div className="outcome-tabs" role="tablist" aria-label="Extraction category">{([ ["interview_invitation", "Interview Invitation"], ["interview_scheduled", "Interview Scheduled"], ["application_confirmation", "Applied"], ["rejected_closed", "Rejected"] ] as const).map(([label, title]) => <button key={label} type="button" role="tab" aria-selected={outcomeLabel === label} className={outcomeLabel === label ? "active" : ""} onClick={() => { setOutcomeLabel(label); setOutcomePage(0); void loadOutcomes(statsMailboxId, 0, label); }}>{title}</button>)}</div>
+                          <input className="modern-control outcome-company-search" type="search" value={outcomeCompanyQuery} onChange={(event) => setOutcomeCompanyQuery(event.target.value)} placeholder="Search company" aria-label="Search company name" />
+                          <button type="button" className="settings-btn outcome-stats-btn" title="Show extracted-data statistics" aria-label="Show extracted-data statistics" aria-expanded={outcomePieOpen} onClick={() => { setOutcomePieOpen(true); void loadOutcomePie(); }}>◔</button>
+                          <button type="button" className="settings-btn outcome-copy-btn" title="Copy all results" aria-label="Copy all results" disabled={!outcomes?.items.length} onClick={() => void copyOutcomes()}>⧉</button>
+                      </div>
+                      {outcomesLoading && <p className="hint">Loading extracted data…</p>}
+                      {!outcomesLoading && outcomes && (
+                        <div className="outcome-table-wrap"><table className="settings-table outcome-table"><thead><tr><th>Date</th><th>Company</th><th>Role</th><th>Subject</th></tr></thead><tbody>{visibleOutcomes.map((item, index) => <tr key={`${item.subject}-${index}`}><td>{formatWhen(item.received_at) || "—"}</td><td>{item.company || "—"}</td><td>{item.role || "—"}</td><td>{item.subject}</td></tr>)}</tbody></table></div>
+                      )}
+                      {outcomes && outcomes.total === 0 && !outcomesLoading && <p className="hint">No extracted records found for this account and category.</p>}
+                      {outcomes && outcomes.total > OUTCOME_PAGE_SIZE && <div className="pagination"><button type="button" className="action-btn" disabled={outcomePage === 0} onClick={() => { const page = outcomePage - 1; setOutcomePage(page); void loadOutcomes(statsMailboxId, page); }}>Previous</button><span>Page {outcomePage + 1} of {Math.ceil(outcomes.total / OUTCOME_PAGE_SIZE)}</span><button type="button" className="action-btn" disabled={(outcomePage + 1) * OUTCOME_PAGE_SIZE >= outcomes.total} onClick={() => { const page = outcomePage + 1; setOutcomePage(page); void loadOutcomes(statsMailboxId, page); }}>Next</button></div>}
+                    </section>
+                  )}
+                  {outcomePieOpen && (
+                    <div className="outcome-pie-modal-backdrop" role="presentation" onMouseDown={() => setOutcomePieOpen(false)}>
+                      <section className="outcome-pie-modal" role="dialog" aria-modal="true" aria-labelledby="outcome-pie-title" onMouseDown={(event) => event.stopPropagation()}>
+                        <header><div><span className="stats-eyebrow">AI extraction</span><h3 id="outcome-pie-title">Company & role statistics</h3></div><button type="button" className="dialog-close" aria-label="Close statistics" onClick={() => setOutcomePieOpen(false)}>×</button></header>
+                        {outcomePieLoading ? <p className="hint">Loading extraction statistics…</p> : outcomePieCounts && <LabelPieChart counts={outcomePieCounts} labels={["application_confirmation", "rejected_closed", "interview_invitation", "interview_scheduled"]} />}
+                      </section>
                     </div>
                   )}
                 </section>
