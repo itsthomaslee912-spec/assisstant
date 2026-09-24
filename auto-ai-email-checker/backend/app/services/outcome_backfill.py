@@ -5,8 +5,8 @@ import logging
 from collections import defaultdict
 
 from app.classify.outcome_extract import BACKFILL_LABELS, extract_company_role
-from app.config import get_settings
 from app.models import EmailMessage
+from app.services.ai_backend import get_ai_backend
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +14,10 @@ CONCURRENCY = 4
 
 
 async def backfill_outcomes(stop_event: asyncio.Event) -> None:
-    """Fill company and role for rejected, screening, and interview mail already stored."""
-    if not get_settings().openai_api_key:
-        logger.info("Skipping company/role backfill; OPENAI_API_KEY is not set")
+    """Fill company and role for closed, screening, and scheduled interview mail."""
+    backend = get_ai_backend()
+    if not backend.api_key:
+        logger.info("Skipping company/role backfill; selected AI provider is not configured")
         return
 
     from app.db import SessionLocal

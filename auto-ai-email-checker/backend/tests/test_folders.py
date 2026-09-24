@@ -54,6 +54,15 @@ def test_normalize_gmail_message_stamps_folder():
     assert normalize_gmail_message(raw)["folder"] == MailFolder.SPAM.value
 
 
+def test_normalize_gmail_message_keeps_unread_state():
+    raw = {
+        "id": "g-unread",
+        "labelIds": ["INBOX", "UNREAD"],
+        "payload": {"headers": []},
+    }
+    assert normalize_gmail_message(raw)["is_read"] is False
+
+
 def test_normalize_outlook_message_stamps_folder():
     raw = {
         "id": "o1",
@@ -63,6 +72,16 @@ def test_normalize_outlook_message_stamps_folder():
         "body": {"contentType": "text", "content": "hello"},
     }
     assert normalize_outlook_message(raw)["folder"] == MailFolder.TRASH.value
+
+
+def test_normalize_outlook_message_keeps_unread_state():
+    raw = {
+        "id": "o-unread",
+        "isRead": False,
+        "from": {"emailAddress": {"address": "a@b.com"}},
+        "body": {"contentType": "text", "content": "hello"},
+    }
+    assert normalize_outlook_message(raw)["is_read"] is False
 
 
 def _session_factory():
@@ -91,6 +110,7 @@ def test_list_emails_filters_folder():
     )
     db.add(mailbox)
     db.flush()
+    mailbox_id = mailbox.id
     db.add_all(
         [
             EmailMessage(
@@ -99,7 +119,7 @@ def test_list_emails_filters_folder():
                 subject="Inbox",
                 sender="a@b.com",
                 snippet="hi",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.INBOX.value,
             ),
             EmailMessage(
@@ -108,7 +128,7 @@ def test_list_emails_filters_folder():
                 subject="Spam",
                 sender="a@b.com",
                 snippet="hi",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.SPAM.value,
             ),
             EmailMessage(
@@ -117,8 +137,17 @@ def test_list_emails_filters_folder():
                 subject="Trash",
                 sender="a@b.com",
                 snippet="hi",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.TRASH.value,
+            ),
+            EmailMessage(
+                mailbox_id=mailbox.id,
+                provider_message_id="sent1",
+                subject="Sent",
+                sender="a@b.com",
+                snippet="hi",
+                label=EmailLabel.OTHER.value,
+                folder=MailFolder.SENT.value,
             ),
         ]
     )
@@ -146,7 +175,10 @@ def test_list_emails_filters_folder():
     assert body["folder_counts"]["inbox"] == 1
     assert body["folder_counts"]["spam"] == 1
     assert body["folder_counts"]["trash"] == 1
+    # Sidebar unread badges include only unread messages currently in Inbox.
+    assert body["mailbox_unread_counts"] == {str(mailbox_id): 1}
 
     mixed = client.get("/api/emails")
     assert mixed.status_code == 200
-    assert mixed.json()["total"] == 3
+    assert mixed.json()["total"] == 4
+    assert mixed.json()["mailbox_unread_counts"] == {str(mailbox_id): 1}

@@ -24,13 +24,21 @@ def _strip_html(html: str) -> str:
     return "".join(out)
 
 
-async def outlook_list_delta(access_token: str, delta_link: str | None = None) -> dict:
-    url = delta_link or f"{GRAPH}/me/mailFolders/inbox/messages/delta"
+class OutlookDeltaExpired(Exception):
+    pass
+
+
+async def outlook_list_delta(
+    access_token: str, folder: str = "inbox", delta_link: str | None = None
+) -> dict:
+    url = delta_link or f"{GRAPH}/me/mailFolders/{folder}/messages/delta"
+    if not url.startswith(f"{GRAPH}/"):
+        raise ValueError("Invalid Outlook delta cursor URL")
     params = None
     if not delta_link:
         params = {
-            "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId",
-            "$top": "25",
+            "$select": "id",
+            "$top": "50",
         }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -38,6 +46,8 @@ async def outlook_list_delta(access_token: str, delta_link: str | None = None) -
             headers={"Authorization": f"Bearer {access_token}"},
             params=params,
         )
+        if delta_link and resp.status_code in {404, 410}:
+            raise OutlookDeltaExpired("Outlook delta cursor expired")
         if resp.status_code >= 400:
             raise HTTPException(status_code=400, detail=f"Outlook delta failed: {resp.text}")
         return resp.json()
@@ -52,6 +62,8 @@ async def outlook_get_message(access_token: str, message_id: str) -> dict:
                 "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId,parentFolderId",
             },
         )
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Outlook message no longer exists")
         if resp.status_code >= 400:
             raise HTTPException(status_code=400, detail=f"Outlook get message failed: {resp.text}")
         return resp.json()
@@ -165,6 +177,7 @@ def normalize_outlook_message(raw: dict) -> dict:
         "body_text": body_text[:20000],
         "body_html": body_html[:200000],
         "folder": folder,
+        "is_read": bool(raw.get("isRead", False)),
     }
 
 
@@ -185,12 +198,17 @@ async def outlook_send_message(
     to_address: str,
     subject: str,
     body_text: str,
+    attachments: list[dict] | None = None,
 ) -> None:
     payload = {
         "message": {
             "subject": subject,
             "body": {"contentType": "Text", "content": body_text},
             "toRecipients": [{"emailAddress": {"address": to_address}}],
+            "attachments": [
+                {"@odata.type": "#microsoft.graph.fileAttachment", "name": item["name"], "contentType": item["content_type"], "contentBytes": item["content_base64"]}
+                for item in (attachments or [])
+            ],
         },
         "saveToSentItems": True,
     }

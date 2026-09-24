@@ -42,7 +42,8 @@ async def start_gmail_watch(db: Session, mailbox: MailboxConnection, access_toke
     else:
         expires_at = datetime.now(timezone.utc) + timedelta(days=6)
 
-    mailbox.sync_cursor = history_id or mailbox.sync_cursor
+    if not mailbox.sync_cursor:
+        mailbox.sync_cursor = history_id or None
     webhook = mailbox.webhook
     if webhook is None:
         webhook = WebhookSubscription(mailbox_id=mailbox.id, provider=Provider.GOOGLE.value)

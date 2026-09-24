@@ -62,34 +62,34 @@ Sagent Talent Team
 
 
 def test_blockstream_is_applied():
-    assert _heuristic_label("", "Blockstream", BLOCKSTREAM, "") == EmailLabel.APPLIED.value
+    assert _heuristic_label("", "Blockstream", BLOCKSTREAM, "") == EmailLabel.APPLICATION_CONFIRMATION.value
     assert (
-        apply_label_guards(EmailLabel.INTERVIEW.value, subject="", sender="", body_text=BLOCKSTREAM, snippet="")
-        == EmailLabel.APPLIED.value
+        apply_label_guards(EmailLabel.INTERVIEW_SCHEDULED.value, subject="", sender="", body_text=BLOCKSTREAM, snippet="")
+        == EmailLabel.APPLICATION_CONFIRMATION.value
     )
 
 
 def test_sagent_is_applied():
-    assert _heuristic_label("", "Sagent", SAGENT, "") == EmailLabel.APPLIED.value
+    assert _heuristic_label("", "Sagent", SAGENT, "") == EmailLabel.APPLICATION_CONFIRMATION.value
     assert (
-        apply_label_guards(EmailLabel.INTERVIEW.value, subject="", sender="", body_text=SAGENT, snippet="")
-        == EmailLabel.APPLIED.value
+        apply_label_guards(EmailLabel.INTERVIEW_SCHEDULED.value, subject="", sender="", body_text=SAGENT, snippet="")
+        == EmailLabel.APPLICATION_CONFIRMATION.value
     )
 
 
 def test_rules_iq_jd_is_alert():
-    assert _heuristic_label("Datacenter Technician", "Atul Singh", RULES_IQ, "") == EmailLabel.JOB_ALERT.value
+    assert _heuristic_label("Datacenter Technician", "Atul Singh", RULES_IQ, "") == EmailLabel.RECRUITMENT_ALERT.value
     assert (
-        apply_label_guards(EmailLabel.INTERVIEW.value, subject="", sender="", body_text=RULES_IQ, snippet="")
-        == EmailLabel.JOB_ALERT.value
+        apply_label_guards(EmailLabel.INTERVIEW_SCHEDULED.value, subject="", sender="", body_text=RULES_IQ, snippet="")
+        == EmailLabel.RECRUITMENT_ALERT.value
     )
 
 
 def test_kate_confirmation_is_interview():
-    assert _heuristic_label("", "Kate", KATE, "") == EmailLabel.INTERVIEW.value
+    assert _heuristic_label("", "Kate", KATE, "") == EmailLabel.INTERVIEW_SCHEDULED.value
     assert (
-        apply_label_guards(EmailLabel.INTERVIEW.value, subject="", sender="", body_text=KATE, snippet="")
-        == EmailLabel.INTERVIEW.value
+        apply_label_guards(EmailLabel.INTERVIEW_SCHEDULED.value, subject="", sender="", body_text=KATE, snippet="")
+        == EmailLabel.INTERVIEW_SCHEDULED.value
     )
 
 
@@ -109,10 +109,10 @@ Upstart Recruiting Team
 
 
 def test_upstart_application_limit_is_rejected():
-    assert _heuristic_label("", "Upstart", UPSTART, "") == EmailLabel.REJECTED.value
+    assert _heuristic_label("", "Upstart", UPSTART, "") == EmailLabel.REJECTED_CLOSED.value
     assert (
-        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=UPSTART, snippet="")
-        == EmailLabel.REJECTED.value
+        apply_label_guards(EmailLabel.OTHER.value, subject="", sender="", body_text=UPSTART, snippet="")
+        == EmailLabel.REJECTED_CLOSED.value
     )
 
 
@@ -133,10 +133,10 @@ StackAdapt
 
 
 def test_stackadapt_not_moving_forward_is_rejected():
-    assert _heuristic_label("", "StackAdapt", STACKADAPT, "") == EmailLabel.REJECTED.value
+    assert _heuristic_label("", "StackAdapt", STACKADAPT, "") == EmailLabel.REJECTED_CLOSED.value
     assert (
-        apply_label_guards(EmailLabel.APPLIED.value, subject="", sender="", body_text=STACKADAPT, snippet="")
-        == EmailLabel.REJECTED.value
+        apply_label_guards(EmailLabel.APPLICATION_CONFIRMATION.value, subject="", sender="", body_text=STACKADAPT, snippet="")
+        == EmailLabel.REJECTED_CLOSED.value
     )
 
 
@@ -180,26 +180,26 @@ Databricks
 
 
 def test_motley_fool_receipt_is_applied():
-    assert _heuristic_label("", "The Motley Fool", MOTLEY_FOOL, "") == EmailLabel.APPLIED.value
+    assert _heuristic_label("", "The Motley Fool", MOTLEY_FOOL, "") == EmailLabel.APPLICATION_CONFIRMATION.value
     assert (
-        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=MOTLEY_FOOL, snippet="")
-        == EmailLabel.APPLIED.value
+        apply_label_guards(EmailLabel.OTHER.value, subject="", sender="", body_text=MOTLEY_FOOL, snippet="")
+        == EmailLabel.APPLICATION_CONFIRMATION.value
     )
 
 
 def test_striim_receipt_is_applied():
-    assert _heuristic_label("", "Striim", STRIIM, "") == EmailLabel.APPLIED.value
+    assert _heuristic_label("", "Striim", STRIIM, "") == EmailLabel.APPLICATION_CONFIRMATION.value
     assert (
-        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=STRIIM, snippet="")
-        == EmailLabel.APPLIED.value
+        apply_label_guards(EmailLabel.OTHER.value, subject="", sender="", body_text=STRIIM, snippet="")
+        == EmailLabel.APPLICATION_CONFIRMATION.value
     )
 
 
 def test_databricks_receipt_is_applied():
-    assert _heuristic_label("", "Databricks", DATABRICKS, "") == EmailLabel.APPLIED.value
+    assert _heuristic_label("", "Databricks", DATABRICKS, "") == EmailLabel.APPLICATION_CONFIRMATION.value
     assert (
-        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=DATABRICKS, snippet="")
-        == EmailLabel.APPLIED.value
+        apply_label_guards(EmailLabel.OTHER.value, subject="", sender="", body_text=DATABRICKS, snippet="")
+        == EmailLabel.APPLICATION_CONFIRMATION.value
     )
 
 
@@ -220,10 +220,10 @@ Please note: per company policy, we are unable to provide individual application
 
 
 def test_cloudbeds_is_rejected():
-    assert _heuristic_label("", "Cloudbeds", CLOUDBEDS, "") == EmailLabel.REJECTED.value
+    assert _heuristic_label("", "Cloudbeds", CLOUDBEDS, "") == EmailLabel.REJECTED_CLOSED.value
     assert (
-        apply_label_guards(EmailLabel.APPLIED.value, subject="", sender="", body_text=CLOUDBEDS, snippet="")
-        == EmailLabel.REJECTED.value
+        apply_label_guards(EmailLabel.APPLICATION_CONFIRMATION.value, subject="", sender="", body_text=CLOUDBEDS, snippet="")
+        == EmailLabel.REJECTED_CLOSED.value
     )
 
 
@@ -248,10 +248,10 @@ This effort requires changing passwords for process accounts and updating each a
 
 
 def test_requirement_dump_is_alert():
-    assert _heuristic_label("", "Recruiter", PRINCIPAL_REQUIREMENT, "") == EmailLabel.JOB_ALERT.value
+    assert _heuristic_label("", "Recruiter", PRINCIPAL_REQUIREMENT, "") == EmailLabel.RECRUITMENT_ALERT.value
     assert (
         apply_label_guards(EmailLabel.SCREENING.value, subject="", sender="", body_text=PRINCIPAL_REQUIREMENT, snippet="")
-        == EmailLabel.JOB_ALERT.value
+        == EmailLabel.RECRUITMENT_ALERT.value
     )
 
 
@@ -268,10 +268,10 @@ The Recruiting Team at Everpure (formerly Pure Storage)
 
 
 def test_everpure_is_rejected():
-    assert _heuristic_label("", "Everpure", EVERPURE, "") == EmailLabel.REJECTED.value
+    assert _heuristic_label("", "Everpure", EVERPURE, "") == EmailLabel.REJECTED_CLOSED.value
     assert (
-        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=EVERPURE, snippet="")
-        == EmailLabel.REJECTED.value
+        apply_label_guards(EmailLabel.OTHER.value, subject="", sender="", body_text=EVERPURE, snippet="")
+        == EmailLabel.REJECTED_CLOSED.value
     )
 
 
@@ -290,10 +290,10 @@ Clearlink Recruiting
 
 
 def test_clearlink_location_is_rejected():
-    assert _heuristic_label("", "Clearlink", CLEARLINK, "") == EmailLabel.REJECTED.value
+    assert _heuristic_label("", "Clearlink", CLEARLINK, "") == EmailLabel.REJECTED_CLOSED.value
     assert (
-        apply_label_guards(EmailLabel.APPLIED.value, subject="", sender="", body_text=CLEARLINK, snippet="")
-        == EmailLabel.REJECTED.value
+        apply_label_guards(EmailLabel.APPLICATION_CONFIRMATION.value, subject="", sender="", body_text=CLEARLINK, snippet="")
+        == EmailLabel.REJECTED_CLOSED.value
     )
 
 
@@ -311,10 +311,10 @@ LinkedIn| Facebook | Glassdoor
 
 
 def test_crosscountry_is_rejected():
-    assert _heuristic_label("", "CrossCountry", CROSSCOUNTRY, "") == EmailLabel.REJECTED.value
+    assert _heuristic_label("", "CrossCountry", CROSSCOUNTRY, "") == EmailLabel.REJECTED_CLOSED.value
     assert (
-        apply_label_guards(EmailLabel.OTHERS.value, subject="", sender="", body_text=CROSSCOUNTRY, snippet="")
-        == EmailLabel.REJECTED.value
+        apply_label_guards(EmailLabel.OTHER.value, subject="", sender="", body_text=CROSSCOUNTRY, snippet="")
+        == EmailLabel.REJECTED_CLOSED.value
     )
 
 
@@ -328,10 +328,10 @@ def test_system_prompt_lists_every_label():
     for slug in slugs:
         assert slug in SYSTEM_PROMPT
     assert "- unknown" not in SYSTEM_PROMPT
-    assert normalize_label("applied") == EmailLabel.APPLIED.value
-    assert normalize_label("application_submitted") == EmailLabel.APPLIED.value
-    assert normalize_label("alert") == EmailLabel.JOB_ALERT.value
-    assert normalize_label("available") == EmailLabel.SCREENING.value
+    assert normalize_label("applied") == EmailLabel.APPLICATION_CONFIRMATION.value
+    assert normalize_label("application_submitted") == EmailLabel.APPLICATION_CONFIRMATION.value
+    assert normalize_label("alert") == EmailLabel.RECRUITMENT_ALERT.value
+    assert normalize_label("available") == EmailLabel.INTERVIEW_INVITATION.value
     assert normalize_label("tech") == EmailLabel.ASSESSMENT.value
-    assert normalize_label("unknown") == EmailLabel.OTHERS.value
-    assert normalize_label("not_a_label") == EmailLabel.OTHERS.value
+    assert normalize_label("unknown") == EmailLabel.OTHER.value
+    assert normalize_label("not_a_label") == EmailLabel.OTHER.value

@@ -49,10 +49,31 @@ def _client():
                 subject="Acme interview",
                 sender="hr@acme.com",
                 snippet="schedule",
-                label=EmailLabel.INTERVIEW.value,
+                label=EmailLabel.INTERVIEW_SCHEDULED.value,
+                interview_subtype="confirmation",
                 folder=MailFolder.INBOX.value,
                 company="Acme",
                 job_role="Engineer",
+            ),
+            EmailMessage(
+                mailbox_id=first.id,
+                provider_message_id="a-reminder-1",
+                subject="Beta interview reminder",
+                sender="hr@beta.com",
+                snippet="tomorrow",
+                label=EmailLabel.INTERVIEW_SCHEDULED.value,
+                interview_subtype="reminder",
+                folder=MailFolder.INBOX.value,
+            ),
+            EmailMessage(
+                mailbox_id=first.id,
+                provider_message_id="a-reminder-2",
+                subject="Gamma interview reminder",
+                sender="hr@gamma.com",
+                snippet="next week",
+                label=EmailLabel.INTERVIEW_SCHEDULED.value,
+                interview_subtype="reminder",
+                folder=MailFolder.INBOX.value,
             ),
             EmailMessage(
                 mailbox_id=second.id,
@@ -60,7 +81,7 @@ def _client():
                 subject="Acme offer follow up",
                 sender="jobs@other.com",
                 snippet="next steps",
-                label=EmailLabel.APPLIED.value,
+                label=EmailLabel.APPLICATION_CONFIRMATION.value,
                 folder=MailFolder.INBOX.value,
             ),
             EmailMessage(
@@ -69,7 +90,7 @@ def _client():
                 subject="Hello",
                 sender="pat@acme.com",
                 snippet="unrelated note",
-                label=EmailLabel.OTHERS.value,
+                label=EmailLabel.OTHER.value,
                 folder=MailFolder.SPAM.value,
             ),
             EmailMessage(
@@ -142,9 +163,41 @@ def test_search_keeps_folder_and_label_filters():
     assert {item["folder"] for item in inbox.json()["items"]} == {"inbox"}
     assert inbox.json()["folder_counts"]["trash"] == 1
 
-    interview = client.get("/api/emails", params={"q": "acme", "label": "interview"})
+    interview = client.get("/api/emails", params={"q": "acme", "label": "interview_scheduled"})
     assert interview.status_code == 200
-    assert [item["label"] for item in interview.json()["items"]] == ["interview"]
+    assert [item["label"] for item in interview.json()["items"]] == ["interview_scheduled"]
 
     role = client.get("/api/emails", params={"q": "Designer"})
     assert [item["subject"] for item in role.json()["items"]] == ["Acme screening"]
+
+
+def test_interview_subtype_filter_applies_before_pagination():
+    client, first_id = _client()
+    first = client.get("/api/emails", params={
+        "label": "interview_scheduled", "interview_subtype": "reminder",
+        "mailbox_id": first_id, "limit": 1,
+    })
+    assert first.status_code == 200
+    first_page = first.json()
+    assert first_page["total"] == 2
+    assert first_page["has_more"] is True
+    assert first_page["items"][0]["interview_subtype"] == "reminder"
+
+    second = client.get("/api/emails", params={
+        "label": "interview_scheduled", "interview_subtype": "reminder",
+        "mailbox_id": first_id, "limit": 1,
+        "before_id": first_page["next_cursor"],
+    })
+    assert second.status_code == 200
+    second_page = second.json()
+    assert second_page["total"] == 2
+    assert second_page["has_more"] is False
+    assert second_page["items"][0]["id"] != first_page["items"][0]["id"]
+    assert second_page["items"][0]["interview_subtype"] == "reminder"
+
+    confirmation = client.get("/api/emails", params={"interview_subtype": "confirmation"})
+    assert confirmation.json()["total"] == 1
+    assert confirmation.json()["items"][0]["label"] == "interview_scheduled"
+
+    invalid = client.get("/api/emails", params={"interview_subtype": "unknown"})
+    assert invalid.status_code == 422

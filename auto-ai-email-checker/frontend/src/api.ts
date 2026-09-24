@@ -1,14 +1,18 @@
 export type EmailLabel =
-  | "job_alert"
-  | "applied"
+  | "application_confirmation"
+  | "application_action_required"
   | "screening"
-  | "interview"
   | "assessment"
+  | "interview_invitation"
+  | "interview_scheduled"
+  | "interview_follow_up"
   | "offer"
-  | "rejected"
-  | "others";
+  | "rejected_closed"
+  | "recruitment_alert"
+  | "other";
 
-export type MailFolder = "inbox" | "spam" | "trash" | "archive";
+export type MailFolder = "inbox" | "sent" | "spam" | "trash" | "archive";
+export type InterviewSubtype = "confirmation" | "calendar_invite" | "reminder" | "reschedule" | "time_change" | "cancellation";
 
 export type Provider = "google" | "microsoft";
 
@@ -21,6 +25,18 @@ export interface Mailbox {
   created_at: string | null;
 }
 
+export type AutoSyncState = "active" | "syncing" | "no_account" | "stopped" | "error";
+
+export interface AutoSyncStatus {
+  state: AutoSyncState;
+  interval_seconds: number;
+  connected_accounts: number;
+  webhook_accounts: number;
+  last_check_at: string | null;
+  last_error: string | null;
+  problem_mailboxes: { mailbox_id: number; email_address: string; message: string }[];
+}
+
 export interface EmailItem {
   id: number;
   mailbox_id: number;
@@ -30,6 +46,7 @@ export interface EmailItem {
   received_at: string | null;
   snippet: string;
   label: EmailLabel;
+  interview_subtype: InterviewSubtype | null;
   confidence: number | null;
   is_read: boolean;
   human_corrected?: boolean;
@@ -85,6 +102,30 @@ export async function fetchMailboxes(): Promise<Mailbox[]> {
   return res.json();
 }
 
+async function autoSyncRequest(method: "GET" | "POST", path: string): Promise<AutoSyncStatus> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method,
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(await readApiError(res, "Failed to check automatic sync"));
+    return res.json();
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+export function fetchAutoSyncStatus(): Promise<AutoSyncStatus> {
+  return autoSyncRequest("GET", "/api/auto-sync/status");
+}
+
+export function checkAutoSyncNow(): Promise<AutoSyncStatus> {
+  return autoSyncRequest("POST", "/api/auto-sync/check");
+}
+
 export interface EmailPage {
   items: EmailItem[];
   next_cursor: number | null;
@@ -100,6 +141,7 @@ export interface EmailPage {
 
 export async function fetchEmails(opts?: {
   label?: string;
+  interviewSubtype?: InterviewSubtype | null;
   folder?: string;
   mailboxId?: number | null;
   query?: string | null;
@@ -111,6 +153,7 @@ export async function fetchEmails(opts?: {
 }): Promise<EmailPage> {
   const params = new URLSearchParams();
   if (opts?.label && opts.label !== "all") params.set("label", opts.label);
+  if (opts?.interviewSubtype) params.set("interview_subtype", opts.interviewSubtype);
   if (opts?.folder && opts.folder !== "all") params.set("folder", opts.folder);
   if (opts?.query?.trim()) params.set("q", opts.query.trim());
   if (opts?.mailboxId != null) params.set("mailbox_id", String(opts.mailboxId));
@@ -145,12 +188,13 @@ export async function fetchEmailDetail(id: number): Promise<EmailDetail> {
 export async function updateEmailLabel(
   id: number,
   label: EmailLabel,
-  saveTraining: boolean
+  saveTraining: boolean,
+  interviewSubtype?: InterviewSubtype
 ): Promise<EmailDetail> {
   const res = await apiFetch(`${API_BASE}/api/emails/${id}/label`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ label, save_training: saveTraining }),
+    body: JSON.stringify({ label, save_training: saveTraining, interview_subtype: interviewSubtype }),
   });
   if (!res.ok) throw new Error(await readApiError(res, "Failed to update category"));
   return res.json();
@@ -188,6 +232,8 @@ export interface ClassifyTrainingExample {
   email_id: number;
   previous_label: string;
   corrected_label: string;
+  previous_subtype: InterviewSubtype | null;
+  corrected_subtype: InterviewSubtype | null;
   subject: string;
   sender: string;
   snippet: string;
@@ -211,6 +257,115 @@ export async function fetchClassifyTraining(opts?: {
   const qs = params.toString();
   const res = await apiFetch(`${API_BASE}/api/classify/training${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(await readApiError(res, "Failed to load training data"));
+  return res.json();
+}
+
+export interface ReclassifyStatus {
+  mailbox_id: number;
+  state: "running" | "done" | "stopped" | "error" | string;
+  updated: number;
+  processed: number;
+  failed: number;
+  total: number;
+  message: string;
+}
+
+export async function fetchReclassifyStatus(id: number): Promise<ReclassifyStatus> {
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/reclassify-status`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load reclassification status"));
+  return res.json();
+}
+
+export interface EmailAttachment {
+  name: string;
+  content_type: string;
+  content_base64: string;
+}
+
+export async function sendEmail(payload: {
+  mailbox_id: number;
+  to_address: string;
+  subject: string;
+  body_text: string;
+  attachments?: EmailAttachment[];
+}): Promise<{ ok: boolean; provider_message_id: string | null }> {
+  const res = await apiFetch(`${API_BASE}/api/emails/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to send email"));
+  return res.json();
+}
+
+export async function createAiReply(id: number): Promise<{ body_text: string }> {
+  const res = await apiFetch(`${API_BASE}/api/emails/${id}/ai-reply`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to create AI draft"));
+  return res.json();
+}
+
+export interface AiSettings {
+  provider: "openai" | "ollama";
+  openai_model: string;
+  openai_key_configured: boolean;
+  openai_admin_key_configured: boolean;
+  ollama_url: string;
+  ollama_model: string;
+  billing_url: string;
+}
+
+export async function fetchAiSettings(): Promise<AiSettings> {
+  const res = await apiFetch(`${API_BASE}/api/ai-settings`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load AI settings"));
+  return res.json();
+}
+
+export async function saveAiSettings(payload: {
+  provider: "openai" | "ollama";
+  openai_model: string;
+  openai_api_key?: string;
+  openai_admin_key?: string;
+  ollama_url: string;
+  ollama_model: string;
+}): Promise<AiSettings> {
+  const res = await apiFetch(`${API_BASE}/api/ai-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to save AI settings"));
+  return res.json();
+}
+
+export interface OpenAiCosts {
+  month_spend_usd: number;
+  currency: "usd";
+  period_start: string;
+  as_of: string;
+  credit_balance_available: false;
+}
+
+export async function fetchOpenAiCosts(): Promise<OpenAiCosts> {
+  const res = await apiFetch(`${API_BASE}/api/ai-settings/openai-costs`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load OpenAI costs"));
+  return res.json();
+}
+
+export async function fetchOllamaModels(url: string): Promise<string[]> {
+  const res = await apiFetch(`${API_BASE}/api/ai-settings/ollama-models?url=${encodeURIComponent(url)}`);
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to load Ollama models"));
+  return (await res.json()).models;
+}
+
+export async function deleteClassifyTrainingExample(id: number): Promise<{ deleted: number }> {
+  const res = await apiFetch(`${API_BASE}/api/classify/training/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to delete training example"));
+  return res.json();
+}
+
+export async function deleteUnusedClassifyTraining(): Promise<{ deleted: number }> {
+  const res = await apiFetch(`${API_BASE}/api/classify/training/unused`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to delete unused training examples"));
   return res.json();
 }
 
@@ -242,16 +397,16 @@ export interface MailboxOutcomes {
   mailbox_id: number;
   date_from: string;
   date_to: string;
-  applied: OutcomeEntry[];
-  rejected: OutcomeEntry[];
+  application_confirmation: OutcomeEntry[];
+  rejected_closed: OutcomeEntry[];
   screening: OutcomeEntry[];
-  interview: OutcomeEntry[];
+  interview_scheduled: OutcomeEntry[];
   items: OutcomeEntry[];
   total: number;
   label: string | null;
 }
 
-export type OutcomeLabel = "applied" | "rejected" | "screening" | "interview";
+export type OutcomeLabel = "application_confirmation" | "rejected_closed" | "screening" | "interview_scheduled" | "interview_invitation";
 
 function statsRangeParams(dateFrom: string, dateTo: string): URLSearchParams {
   return new URLSearchParams({
@@ -321,6 +476,19 @@ export interface SyncStartResult {
 export async function syncMailbox(id: number): Promise<SyncStartResult> {
   const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/sync`, { method: "POST" });
   if (!res.ok) throw new Error(await readApiError(res, "Failed to sync mailbox"));
+  return res.json();
+}
+
+export async function extractMailboxOutcomes(mailboxId: number, label: "rejected_closed" | "interview_invitation"): Promise<{ ok: boolean; message: string }> {
+  const params = new URLSearchParams({ label });
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${mailboxId}/outcomes/extract?${params}`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to start AI extraction"));
+  return res.json();
+}
+
+export async function fullRescanMailbox(id: number): Promise<SyncStartResult> {
+  const res = await apiFetch(`${API_BASE}/api/mailboxes/${id}/sync/full`, { method: "POST" });
+  if (!res.ok) throw new Error(await readApiError(res, "Failed to rescan mailbox"));
   return res.json();
 }
 

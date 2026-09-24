@@ -28,14 +28,17 @@ UtcDateTime = Annotated[
 ]
 
 EmailLabelLiteral = Literal[
-    "job_alert",
-    "applied",
+    "application_confirmation",
+    "application_action_required",
     "screening",
-    "interview",
     "assessment",
+    "interview_invitation",
+    "interview_scheduled",
+    "interview_follow_up",
     "offer",
-    "rejected",
-    "others",
+    "rejected_closed",
+    "recruitment_alert",
+    "other",
 ]
 ProviderLiteral = Literal["google", "microsoft"]
 
@@ -62,6 +65,7 @@ class EmailOut(BaseModel):
     received_at: UtcDateTime | None = None
     snippet: str
     label: str
+    interview_subtype: str | None = None
     confidence: float | None = None
     is_read: bool = False
     human_corrected: bool = False
@@ -91,16 +95,27 @@ class EmailDetailOut(EmailOut):
     body_html: str = ""
 
 
+class EmailAttachmentIn(BaseModel):
+    name: str
+    content_type: str = "application/octet-stream"
+    content_base64: str
+
+
 class SendEmailIn(BaseModel):
     mailbox_id: int
     to_address: str
     subject: str
     body_text: str
+    attachments: list[EmailAttachmentIn] = []
 
 
 class SendEmailOut(BaseModel):
     ok: bool
     provider_message_id: str | None = None
+
+
+class AiReplyOut(BaseModel):
+    body_text: str
 
 
 class HealthOut(BaseModel):
@@ -110,6 +125,7 @@ class HealthOut(BaseModel):
 
 class ClassificationResult(BaseModel):
     label: EmailLabelLiteral
+    interview_subtype: Literal["confirmation", "calendar_invite", "reminder", "reschedule", "time_change", "cancellation"] | None = None
     confidence: float | None = None
     response_id: str | None = None
 
@@ -117,6 +133,7 @@ class ClassificationResult(BaseModel):
 class EmailLabelUpdateIn(BaseModel):
     label: EmailLabelLiteral
     save_training: bool = True
+    interview_subtype: Literal["confirmation", "calendar_invite", "reminder", "reschedule", "time_change", "cancellation"] | None = None
 
 
 class ClassifyPromptStatusOut(BaseModel):
@@ -141,6 +158,8 @@ class ClassifyTrainingExampleOut(BaseModel):
     email_id: int
     previous_label: str
     corrected_label: str
+    previous_subtype: str | None = None
+    corrected_subtype: str | None = None
     subject: str
     sender: str
     snippet: str
@@ -187,10 +206,10 @@ class MailboxOutcomesOut(BaseModel):
     mailbox_id: int
     date_from: str
     date_to: str
-    applied: list[OutcomeEntryOut] = []
-    rejected: list[OutcomeEntryOut] = []
+    application_confirmation: list[OutcomeEntryOut] = []
+    rejected_closed: list[OutcomeEntryOut] = []
     screening: list[OutcomeEntryOut] = []
-    interview: list[OutcomeEntryOut] = []
+    interview_scheduled: list[OutcomeEntryOut] = []
     items: list[OutcomeEntryOut] = []
     total: int = 0
     label: str | None = None

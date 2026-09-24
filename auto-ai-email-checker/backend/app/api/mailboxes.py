@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.oauth_google import ensure_google_access_token
 from app.auth.oauth_microsoft import ensure_microsoft_access_token
-from app.db import get_db
-from app.classify.outcome_extract import OUTCOME_LABELS
+from app.db import SessionLocal, get_db
+from app.classify.outcome_extract import OUTCOME_LABELS, apply_outcome
 from app.models import EmailLabel, EmailMessage, MailboxConnection, Provider
 from app.realtime.gmail_watch import stop_gmail_watch
 from app.realtime.outlook_subscriptions import (
@@ -88,7 +88,7 @@ def _count_labels(db: Session, mailbox_ids: list[int], start: datetime, end: dat
     )
     total = 0
     for lab, count in rows:
-        key = lab if lab in valid else EmailLabel.OTHERS.value
+        key = lab if lab in valid else EmailLabel.OTHER.value
         n = int(count)
         label_counts[key] = label_counts.get(key, 0) + n
         total += n
@@ -259,10 +259,10 @@ def mailbox_outcomes(
             mailbox_id=mailbox_id,
             date_from=start_label,
             date_to=end_label,
-            applied=grouped[EmailLabel.APPLIED.value],
-            rejected=grouped[EmailLabel.REJECTED.value],
+            application_confirmation=grouped[EmailLabel.APPLICATION_CONFIRMATION.value],
+            rejected_closed=grouped[EmailLabel.REJECTED_CLOSED.value],
             screening=grouped[EmailLabel.SCREENING.value],
-            interview=grouped[EmailLabel.INTERVIEW.value],
+            interview_scheduled=grouped[EmailLabel.INTERVIEW_SCHEDULED.value],
         )
     page = grouped[label]
     return MailboxOutcomesOut(
@@ -273,6 +273,34 @@ def mailbox_outcomes(
         total=len(page),
         label=label,
     )
+
+
+async def _extract_outcomes_for_label(mailbox_id: int, label: str) -> None:
+    db = SessionLocal()
+    try:
+        rows = db.query(EmailMessage).filter(
+            EmailMessage.mailbox_id == mailbox_id,
+            EmailMessage.label == label,
+        ).all()
+        for row in rows:
+            if await apply_outcome(db, row, force=True):
+                db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/{mailbox_id}/outcomes/extract")
+async def extract_mailbox_outcomes(
+    mailbox_id: int,
+    background_tasks: BackgroundTasks,
+    label: str = Query(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    if label not in {EmailLabel.REJECTED_CLOSED.value, EmailLabel.INTERVIEW_INVITATION.value}:
+        raise HTTPException(status_code=400, detail="Choose Rejected / Closed or Interview Invitation")
+    _active_mailbox(db, mailbox_id)
+    background_tasks.add_task(_extract_outcomes_for_label, mailbox_id, label)
+    return {"ok": True, "message": "AI extraction started in the background"}
 
 
 @router.delete("/{mailbox_id}")
@@ -322,7 +350,7 @@ async def sync_mailbox(mailbox_id: int, db: Session = Depends(get_db)) -> dict:
     )
     if mailbox is None:
         raise HTTPException(status_code=404, detail="Mailbox not found")
-    status = await start_mailbox_sync(mailbox.id)
+    status = await start_mailbox_sync(mailbox.id, force_full=True)
     return {"ok": True, **status}
 
 
@@ -338,6 +366,21 @@ async def stop_mailbox_sync(mailbox_id: int, db: Session = Depends(get_db)) -> d
     if mailbox is None:
         raise HTTPException(status_code=404, detail="Mailbox not found")
     status = await request_stop_sync(mailbox.id)
+    return {"ok": True, **status}
+
+
+@router.post("/{mailbox_id}/sync/full")
+async def full_rescan_mailbox(mailbox_id: int, db: Session = Depends(get_db)) -> dict:
+    from app.services.mailbox_sync import start_mailbox_sync
+
+    mailbox = (
+        db.query(MailboxConnection)
+        .filter(MailboxConnection.id == mailbox_id, MailboxConnection.is_active.is_(True))
+        .one_or_none()
+    )
+    if mailbox is None:
+        raise HTTPException(status_code=404, detail="Mailbox not found")
+    status = await start_mailbox_sync(mailbox.id, force_full=True)
     return {"ok": True, **status}
 
 

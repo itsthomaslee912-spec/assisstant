@@ -40,8 +40,12 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     backend_public_url: str = "http://localhost:8000"
     session_secret: str = "change-me-session-secret"
-    # Max Inbox messages to pull on Sync / first connect (paged). Not a Gmail API hard limit.
+    # Max messages to pull on initial import / Full rescan (paged). Not a Gmail API hard limit.
     mail_sync_max: int = 10000
+    # JSON map of mailbox addresses to sender addresses that should never be imported.
+    mail_sync_excluded_senders: str = "{}"
+    auto_sync_interval_seconds: int = 120
+    auto_sync_max_messages: int = 200
 
 
 @lru_cache
