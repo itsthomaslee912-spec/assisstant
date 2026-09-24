@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -14,7 +15,9 @@ from app.models import Profile, User
 from app.schemas import Page, ProfileCreate, ProfileOut, ProfileUpdate
 
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
-UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads" / "resumes"
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+UPLOAD_ROOT = Path(os.getenv("RESUME_UPLOAD_ROOT", "/tmp" if os.getenv("VERCEL") else str(BACKEND_ROOT)))
+UPLOAD_DIR = UPLOAD_ROOT / "uploads" / "resumes"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -115,8 +118,7 @@ def download_resume(profile_id: int, db: Session = Depends(get_db), user: User =
     profile = _allowed_profile(db, user, profile_id)
     if not profile.resume_path:
         raise HTTPException(status_code=404, detail="Resume not uploaded")
-    path = Path(__file__).resolve().parents[2] / profile.resume_path
+    path = UPLOAD_ROOT / profile.resume_path
     if not path.exists():
         raise HTTPException(status_code=404, detail="Resume file not found")
     return FileResponse(path, filename=path.name)
-
