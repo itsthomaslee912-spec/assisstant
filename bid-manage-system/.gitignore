@@ -1,0 +1,15 @@
+.env
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/data/
+backend/uploads/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/vite.config.d.ts
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo

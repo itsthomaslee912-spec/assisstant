@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BidFlow">
+  <defs>
+    <linearGradient id="background" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f8cff" />
+      <stop offset="1" stop-color="#7258f5" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#background)" />
+  <path d="M19 15h15.5c8.1 0 13.5 4.2 13.5 11.4 0 4.4-2.3 7.8-6.5 9.5L48 49H37.8l-5.6-10.6H28V49h-9V15Zm9 7.7v8.3h6c3.2 0 5-1.5 5-4.2 0-2.8-1.8-4.1-5-4.1h-6Z" fill="#fff" />
+  <circle cx="47" cy="15" r="6" fill="#28e0c1" stroke="#fff" stroke-width="2" />
+</svg>
