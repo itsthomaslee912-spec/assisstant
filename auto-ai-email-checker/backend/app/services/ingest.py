@@ -43,6 +43,12 @@ async def ingest_normalized_message(
         if new_received is not None and existing.received_at != new_received:
             existing.received_at = new_received
             changed = True
+        # Provider sync is the source of truth for unread state. This also
+        # repairs records imported before read state was persisted.
+        new_is_read = bool(normalized.get("is_read", False))
+        if existing.is_read != new_is_read:
+            existing.is_read = new_is_read
+            changed = True
         if changed:
             db.commit()
         return None
@@ -92,6 +98,7 @@ async def ingest_normalized_message(
         confidence=classification.confidence if classification else None,
         openai_response_id=classification.response_id if classification else None,
         folder=normalize_folder(normalized.get("folder")),
+        is_read=bool(normalized.get("is_read", False)),
     )
     db.add(email)
     if not download_only:

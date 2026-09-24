@@ -389,6 +389,8 @@ def normalize_gmail_message(raw: dict) -> dict:
         "body_text": body_text[:20000],
         "body_html": body_html[:200000],
         "folder": folder_from_gmail_labels(raw.get("labelIds")),
+        # Gmail marks unread messages with the UNREAD system label.
+        "is_read": "UNREAD" not in set(raw.get("labelIds") or []),
     }
 
 

@@ -16,3 +16,7 @@ dist/
 .idea/
 .vscode/
 backend/uploads/
+backend/build-desktop/
+src-tauri/binaries/
+src-tauri/target/
+release/*.exe

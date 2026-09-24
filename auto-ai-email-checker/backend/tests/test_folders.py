@@ -54,6 +54,15 @@ def test_normalize_gmail_message_stamps_folder():
     assert normalize_gmail_message(raw)["folder"] == MailFolder.SPAM.value
 
 
+def test_normalize_gmail_message_keeps_unread_state():
+    raw = {
+        "id": "g-unread",
+        "labelIds": ["INBOX", "UNREAD"],
+        "payload": {"headers": []},
+    }
+    assert normalize_gmail_message(raw)["is_read"] is False
+
+
 def test_normalize_outlook_message_stamps_folder():
     raw = {
         "id": "o1",
@@ -63,6 +72,16 @@ def test_normalize_outlook_message_stamps_folder():
         "body": {"contentType": "text", "content": "hello"},
     }
     assert normalize_outlook_message(raw)["folder"] == MailFolder.TRASH.value
+
+
+def test_normalize_outlook_message_keeps_unread_state():
+    raw = {
+        "id": "o-unread",
+        "isRead": False,
+        "from": {"emailAddress": {"address": "a@b.com"}},
+        "body": {"contentType": "text", "content": "hello"},
+    }
+    assert normalize_outlook_message(raw)["is_read"] is False
 
 
 def _session_factory():

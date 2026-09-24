@@ -177,6 +177,7 @@ def normalize_outlook_message(raw: dict) -> dict:
         "body_text": body_text[:20000],
         "body_html": body_html[:200000],
         "folder": folder,
+        "is_read": bool(raw.get("isRead", False)),
     }
 
 
