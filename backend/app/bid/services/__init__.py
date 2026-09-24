@@ -1,1 +1,0 @@
-# Bid Manage services
